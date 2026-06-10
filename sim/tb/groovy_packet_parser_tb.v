@@ -166,11 +166,25 @@ module groovy_packet_parser_tb;
         @(negedge clk);
         if (!bad_packet) begin $display("FAIL: deprecated cmd 6 not flagged"); errors=errors+1; end
 
-        // ---- error: INIT with wrong length (4 bytes) ----
-        send_byte(8'd2,1,0); send_byte(8'h00,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,1);
+        // ---- CMD_INIT 4-byte form (rgbMode omitted -> RGB888) ----
+        send_byte(8'd2, 1, 0);
+        send_byte(8'd1, 0, 0);   // lz4
+        send_byte(8'd2, 0, 0);   // sound rate
+        send_byte(8'd1, 0, 1);   // sound chan ; no rgb byte
+        @(negedge clk);
+        if (!init_valid || bad_packet) begin
+            $display("FAIL: 4-byte INIT not accepted"); errors=errors+1; end
+        if (init_lz4!==8'd1 || init_sound_rate!==8'd2 ||
+            init_sound_chan!==8'd1 || init_rgb_mode!==8'd0) begin
+            $display("FAIL: 4-byte INIT fields lz4=%0d sr=%0d ch=%0d rgb=%0d (rgb must default 0)",
+                init_lz4, init_sound_rate, init_sound_chan, init_rgb_mode);
+            errors=errors+1; end
+
+        // ---- error: INIT with genuinely invalid length (3 bytes) ----
+        send_byte(8'd2,1,0); send_byte(8'h00,0,0); send_byte(8'h00,0,1);
         @(negedge clk);
         if (!bad_packet || init_valid) begin
-            $display("FAIL: short INIT not flagged"); errors=errors+1; end
+            $display("FAIL: 3-byte INIT not flagged"); errors=errors+1; end
 
         if (errors == 0) $display("PASS: groovy_packet_parser_tb");
         else begin $display("FAIL: groovy_packet_parser_tb (%0d errors)", errors); $fatal(1); end

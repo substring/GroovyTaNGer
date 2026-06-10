@@ -130,12 +130,14 @@ module groovy_packet_parser (
                         if (len == 6'd1) close_valid <= 1'b1; else bad_packet <= 1'b1;
                     end
                     CMD_INIT: begin
-                        if (len == 6'd5) begin
+                        // receiver accepts 4 OR 5 bytes (groovy.cpp:2003);
+                        // len==4 omits rgbMode -> defaults to RGB888 (0).
+                        if (len == 6'd5 || len == 6'd4) begin
                             init_valid      <= 1'b1;
                             init_lz4        <= pkt[1];
                             init_sound_rate <= pkt[2];
                             init_sound_chan <= pkt[3];
-                            init_rgb_mode   <= pkt[4];
+                            init_rgb_mode   <= (len == 6'd5) ? pkt[4] : 8'd0;
                         end else bad_packet <= 1'b1;
                     end
                     CMD_SWITCHRES: begin
