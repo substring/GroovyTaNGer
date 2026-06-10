@@ -1,0 +1,13 @@
+Groovy_Tang is licensed under the GNU General Public License v2.0 or later
+(SPDX-License-Identifier: GPL-2.0-or-later), in alignment with Groovy_MiSTer
+from which it inherits code.
+
+The full text of the GNU General Public License version 2 is available at:
+  https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+Vendored third-party code keeps its own license and attribution:
+  - sameer/hdl-util/hdmi .......... see rtl/generic/video/hdmi/ (when vendored)
+  - nand2mario/tangcore (hdmi2) ... see vendored sources for notices
+
+A copy of the full GPLv2 text should be placed in this file before any public
+release. This stub records intent and the SPDX identifier for now.

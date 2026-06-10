@@ -1,0 +1,24 @@
+// Groovy_Tang - Gowin physical constraints for Tang Primer 20K Dock.
+// Roadmap: Phase 0/2. SPDX-License-Identifier: GPL-2.0-or-later
+//
+// STUB - pin locations MUST be confirmed against the Sipeed Tang Primer 20K
+// Dock schematic before use (spec sections 2 and 8 mark these "a confirmer").
+// Format is Gowin .cst (IO_LOC / IO_PORT).
+
+// -- Reference clock (27 MHz onboard oscillator) --
+// [A VERIFIER] spec section 2 suggests pin H11.
+// IO_LOC "clk_27" H11;
+// IO_PORT "clk_27" IO_TYPE=LVCMOS33;
+
+// -- Reset button (active low) --
+// IO_LOC "rst_n" <PIN>;
+// IO_PORT "rst_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// -- HDMI TMDS (ELVDS pairs) --  [A VERIFIER from Dock schematic]
+// IO_LOC "tmds_clk_p" <PIN>,<PINn>;
+// IO_PORT "tmds_clk_p" IO_TYPE=LVDS25;
+// IO_LOC "tmds_d_p[0]" <PIN>,<PINn>;
+// IO_LOC "tmds_d_p[1]" <PIN>,<PINn>;
+// IO_LOC "tmds_d_p[2]" <PIN>,<PINn>;
+
+// -- Ethernet PHY (RMII/RGMII) --  [A VERIFIER from Dock schematic, Phase 5]

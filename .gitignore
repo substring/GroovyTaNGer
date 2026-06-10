@@ -1,0 +1,24 @@
+# Simulation artifacts
+sim/build/
+*.vvp
+*.vcd
+*.fst
+*.lxt2
+
+# Gowin EDA project artifacts
+impl/
+*.fs
+*.bit
+*.rpt.html
+*.rpt.txt
+gwsynthesis/
+*.bak
+*.gprj.user
+
+# Claude Code local (per-user) settings
+.claude/settings.local.json
+
+# Editor
+*.swp
+.vscode/
+.idea/
