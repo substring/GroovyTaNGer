@@ -37,7 +37,7 @@ module groovy_switchres_tb;
     function [15:0] le16; input integer base; begin
         le16 = {cap[base+1], cap[base+0]}; end endfunction
 
-    integer fvco, ach;
+    integer serial, ach;
     initial begin
         rst=1; switchres_valid=0; send=0; sr_pclk=0; sr_h_total=0; sr_v_total=0;
         @(negedge clk); @(negedge clk); rst=0;
@@ -60,12 +60,13 @@ module groovy_switchres_tb;
         if (le16(23) !== 16'd262)   begin $display("FAIL: v_total=%0d", le16(23)); errors=errors+1; end
         if (cap[20]  !== 8'd1)      begin $display("FAIL: ok=%0d (exp 1)", cap[20]); errors=errors+1; end
 
-        // coeffs must reproduce achieved_khz (two-step integer division, like the solver)
-        fvco = (FREF * cap[14]) / cap[13];     // FREF*fbdiv/idiv
-        ach  = fvco / cap[15];                  // /odiv
+        // coeffs must reproduce the achieved PIXEL clock (Gowin model):
+        //   serial CLKOUT = FREF*fbdiv/idiv ; pixel = serial/5 (odiv only sets VCO)
+        serial = (FREF * cap[14]) / cap[13];
+        ach    = serial / 5;
         if (ach !== le32(16)) begin
-            $display("FAIL: coeffs idiv=%0d fbdiv=%0d odiv=%0d -> %0d, reported %0d",
-                     cap[13], cap[14], cap[15], ach, le32(16)); errors=errors+1; end
+            $display("FAIL: coeffs idiv=%0d fbdiv=%0d -> serial %0d -> pixel %0d, reported %0d",
+                     cap[13], cap[14], serial, ach, le32(16)); errors=errors+1; end
 
         $display("  GTSR: pclk=%0d kHz n=%0d -> out=%0d kHz | idiv=%0d fbdiv=%0d odiv=%0d -> %0d kHz ok=%0d",
                  le32(4), cap[8], le32(9), cap[13], cap[14], cap[15], le32(16), cap[20]);

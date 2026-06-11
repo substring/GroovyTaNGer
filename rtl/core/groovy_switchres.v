@@ -62,12 +62,16 @@ module groovy_switchres (
     wire start_slow = sw_s[2] ^ sw_s[1];
 
     // ---- PLL solver (slow clock) ----
+    // The Gowin rPLL feeds DVI_TX's 5x serial clock (CLKDIV/5 -> pixel), so the
+    // solver target is pclk_out * 5. idiv/fbdiv/odiv are the rPLL coefficients;
+    // the achieved PIXEL clock = (FREF*fbdiv/idiv) / 5.
+    wire [31:0] serial_target = pclk_out_c * 32'd5;
     wire        solver_done, solver_ok;
     wire [6:0]  s_idiv, s_fbdiv;
     wire [7:0]  s_odiv;
-    wire [31:0] s_ach;
+    wire [31:0] s_ach;                       // achieved CLKOUT (serial)
     groovy_pll_solver u_solver (
-        .clk(clk_slow), .rst(rst), .start(start_slow), .fout_khz(pclk_out_c),
+        .clk(clk_slow), .rst(rst), .start(start_slow), .fout_khz(serial_target),
         .done(solver_done), .busy(), .ok(solver_ok),
         .idiv(s_idiv), .fbdiv(s_fbdiv), .odiv(s_odiv),
         .achieved_khz(s_ach), .error_khz());
@@ -88,7 +92,8 @@ module groovy_switchres (
             end
             if (solver_done) begin
                 idiv <= s_idiv; fbdiv <= s_fbdiv; odiv <= s_odiv;
-                achieved_khz <= s_ach; ok <= solver_ok; result_valid <= 1'b1;
+                achieved_khz <= s_ach / 32'd5;   // report achieved PIXEL clock
+                ok <= solver_ok; result_valid <= 1'b1;
             end
         end
     end
