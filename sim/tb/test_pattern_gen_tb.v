@@ -8,8 +8,10 @@ module test_pattern_gen_tb;
     integer     errors = 0;
 
     localparam HA = 1280, VA = 720, BW = HA/8;
+    reg [11:0] h_act = HA, v_act = VA;
 
-    test_pattern_gen #(.H_ACT(HA), .V_ACT(VA)) dut (
+    test_pattern_gen dut (
+        .h_act(h_act), .v_act(v_act),
         .hcount(hcount), .vcount(vcount), .de(de), .r(r), .g(g), .b(b));
 
     task chk; input [15:0] h, v; input dd;

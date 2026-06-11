@@ -46,7 +46,8 @@ module groovy_video_top (
 
     // ---- color bars (our generator) ----
     wire [7:0] r, g, b;
-    test_pattern_gen #(.H_ACT(1280), .V_ACT(720)) u_pat (
+    test_pattern_gen u_pat (
+        .h_act(12'd1280), .v_act(12'd720),
         .hcount(hcount), .vcount(vcount), .de(de), .r(r), .g(g), .b(b));
 
     // ---- Gowin DVI_TX IP (generated; see README) ----
