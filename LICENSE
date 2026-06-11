@@ -6,8 +6,13 @@ The full text of the GNU General Public License version 2 is available at:
   https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
 
 Vendored third-party code keeps its own license and attribution:
+  - Sipeed/ZiyangYE RMII UDP stack . rtl/vendor/sipeed_udp/ (Apache-2.0; see
+                                     its LICENSE + NOTICE.md and per-file headers)
   - sameer/hdl-util/hdmi .......... see rtl/generic/video/hdmi/ (when vendored)
   - nand2mario/tangcore (hdmi2) ... see vendored sources for notices
+
+Reference (not linked into the build): extern/Groovy_MiSTer (submodule, GPLv2)
+— protocol/RTL reference; see docs/protocol_verified.md.
 
 A copy of the full GPLv2 text should be placed in this file before any public
 release. This stub records intent and the SPDX identifier for now.
