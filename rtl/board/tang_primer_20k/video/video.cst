@@ -1,0 +1,22 @@
+// Groovy_Tang - HDMI video bring-up physical constraints (Tang Primer 20K Dock).
+// SPDX-License-Identifier: GPL-2.0-or-later
+// TMDS pinout from the Sipeed HDMI example (HDMI/src/dk_video.cst), confirmed
+// working on this board. The _p net carries both pins of each ELVDS pair (p,n);
+// the _n net is implied by the differential output.
+
+IO_LOC  "O_tmds_clk_p" G16,H15;
+IO_PORT "O_tmds_clk_p" PULL_MODE=NONE DRIVE=3.5;
+IO_LOC  "O_tmds_data_p[0]" H14,H16;
+IO_PORT "O_tmds_data_p[0]" PULL_MODE=NONE DRIVE=3.5;
+IO_LOC  "O_tmds_data_p[1]" J15,K16;
+IO_PORT "O_tmds_data_p[1]" PULL_MODE=NONE DRIVE=3.5;
+IO_LOC  "O_tmds_data_p[2]" K14,K15;
+IO_PORT "O_tmds_data_p[2]" PULL_MODE=NONE DRIVE=3.5;
+
+IO_LOC  "O_led[3]" N16;  IO_PORT "O_led[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "O_led[2]" N14;  IO_PORT "O_led[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "O_led[1]" L14;  IO_PORT "O_led[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "O_led[0]" L16;  IO_PORT "O_led[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC  "I_rst_n" T10;   IO_PORT "I_rst_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "I_clk" H11;     IO_PORT "I_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;

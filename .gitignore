@@ -26,3 +26,8 @@ gwsynthesis/
 # Python
 __pycache__/
 *.pyc
+
+# Gowin proprietary IP (regenerate locally; see each dir's README)
+rtl/board/tang_primer_20k/video/dvi_tx/dvi_tx.v
+rtl/board/tang_primer_20k/video/dvi_tx/dvi_tx.vo
+rtl/board/tang_primer_20k/video/dvi_tx/*.ipc
