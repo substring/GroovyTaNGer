@@ -14,6 +14,10 @@ add_file rtl/core/groovy_ack_policy.v
 add_file rtl/core/groovy_ack_sender.v
 add_file rtl/core/groovy_features.v
 add_file rtl/core/groovy_tx_arbiter.v
+add_file rtl/core/groovy_switchres.v
+add_file rtl/core/pclk_double_to_khz.v
+add_file rtl/core/groovy_pll_solver.v
+add_file rtl/generic/video/superres_factor.v
 add_file rtl/board/tang_primer_20k/eth/groovy_eth_top.sv
 # constraints
 add_file rtl/board/tang_primer_20k/eth/groovy_eth.cst

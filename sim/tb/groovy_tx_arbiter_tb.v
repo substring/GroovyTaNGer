@@ -43,6 +43,7 @@ module groovy_tx_arbiter_tb;
         .req_ip(REQ_IP), .req_port(REQ_PORT), .our_port(OUR_PORT), .req_valid(1'b1),
         .ack_valid(ack_valid), .ack_data(ack_data), .ack_last(ack_last), .ack_ready(ack_ready),
         .ft_valid(ft_valid), .ft_data(ft_data), .ft_last(ft_last), .ft_ready(ft_ready),
+        .sr_valid(1'b0), .sr_data(8'd0), .sr_last(1'b0), .sr_ready(),
         .tx_ip(tx_ip), .tx_src_port(tx_src_port), .tx_dst_port(tx_dst_port),
         .tx_data(tx_data), .tx_data_av(tx_data_av), .tx_req(tx_req),
         .tx_req_rdy(tx_req_rdy), .tx_data_rdy(tx_data_rdy));

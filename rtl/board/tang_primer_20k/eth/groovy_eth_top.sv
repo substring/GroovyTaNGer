@@ -100,23 +100,25 @@ module groovy_eth_top (
     wire [7:0] p_data = sdat;
 
     wire        init_valid, close_valid, get_status_valid, blit_valid;
-    wire        get_features_valid, session_active;
+    wire        get_features_valid, get_switchres_valid, switchres_valid, session_active;
     wire [7:0]  i_lz4, i_sr, i_sc, i_rgb;
     wire [31:0] blit_frame;
     wire [15:0] blit_vsync;
+    wire [63:0] sr_pclk;
+    wire [15:0] sr_h_total, sr_v_total;
 
     groovy_packet_parser u_parser (
         .clk(clk50m), .rst(core_rst),
         .in_valid(p_valid), .in_data(p_data), .in_sop(p_sop), .in_eop(p_eop),
         .cmd_valid(), .cmd(), .bad_packet(),
         .close_valid(close_valid), .init_valid(init_valid),
-        .switchres_valid(), .audio_valid(), .get_status_valid(get_status_valid),
+        .switchres_valid(switchres_valid), .audio_valid(), .get_status_valid(get_status_valid),
         .blit_valid(blit_valid), .get_version_valid(),
-        .get_features_valid(get_features_valid),
+        .get_features_valid(get_features_valid), .get_switchres_valid(get_switchres_valid),
         .init_lz4(i_lz4), .init_sound_rate(i_sr),
         .init_sound_chan(i_sc), .init_rgb_mode(i_rgb),
-        .sr_pclk(), .sr_h_active(), .sr_h_begin(), .sr_h_end(), .sr_h_total(),
-        .sr_v_active(), .sr_v_begin(), .sr_v_end(), .sr_v_total(), .sr_interlace(),
+        .sr_pclk(sr_pclk), .sr_h_active(), .sr_h_begin(), .sr_h_end(), .sr_h_total(sr_h_total),
+        .sr_v_active(), .sr_v_begin(), .sr_v_end(), .sr_v_total(sr_v_total), .sr_interlace(),
         .audio_size(),
         .blit_frame(blit_frame), .blit_field(), .blit_vsync(blit_vsync),
         .blit_lz4(), .blit_csize(), .blit_flag()
@@ -171,6 +173,17 @@ module groovy_eth_top (
         .out_ready(ft_ready), .busy(ft_busy)
     );
 
+    // ---- SWITCHRES compute + result reply (Rung 4a) ----
+    wire sr_v, sr_l, sr_rdy;  wire [7:0] sr_d;
+    groovy_switchres u_switchres (
+        .clk(clk50m), .clk_slow(clk1m), .rst(core_rst),
+        .switchres_valid(switchres_valid), .sr_pclk(sr_pclk),
+        .sr_h_total(sr_h_total), .sr_v_total(sr_v_total),
+        .send(get_switchres_valid),
+        .out_valid(sr_v), .out_data(sr_d), .out_last(sr_l), .out_ready(sr_rdy), .busy(),
+        .result_valid(), .idiv(), .fbdiv(), .odiv(), .achieved_khz(), .ok()
+    );
+
     // ---- TX arbiter -> udp ----
     // Reply to the captured requester. TX path proven; header-capture race is
     // absorbed by req_valid (arbiter holds the send until the address is latched).
@@ -185,6 +198,7 @@ module groovy_eth_top (
         .req_ip(dst_ip), .req_port(dst_port), .our_port(OUR_PORT), .req_valid(dst_valid),
         .ack_valid(ack_valid), .ack_data(ack_data), .ack_last(ack_last), .ack_ready(ack_ready),
         .ft_valid(ft_valid), .ft_data(ft_data), .ft_last(ft_last), .ft_ready(ft_ready),
+        .sr_valid(sr_v), .sr_data(sr_d), .sr_last(sr_l), .sr_ready(sr_rdy),
         .tx_ip(tx_ip), .tx_src_port(tx_src_port), .tx_dst_port(tx_dst_port),
         .tx_data(tx_data), .tx_data_av(tx_data_av), .tx_req(tx_req),
         .tx_req_rdy(tx_req_rdy), .tx_data_rdy(tx_data_rdy)

@@ -21,6 +21,7 @@ DATA_PORT = 32100
 CMD_CLOSE, CMD_INIT, CMD_SWITCHRES, CMD_AUDIO = 1, 2, 3, 4
 CMD_GET_STATUS, CMD_BLIT_FIELD_VSYNC, CMD_GET_VERSION = 5, 7, 8
 CMD_GET_FEATURES = 9                       # Groovy_Tang v2.0.0 extension
+CMD_GET_SWITCHRES_RESULT = 10              # v2.0.0 debug: read mode-change math
 
 RATE_CODE = {0: 0, 22050: 1, 44100: 2, 48000: 3}
 COMP_BITS = ["RAW", "LZ4", "RLE", "QOI"]
@@ -38,7 +39,25 @@ def decode_features(data: bytes) -> str:
             f"| rgb={'|'.join(rgbs)} (0x{rgb:02x})")
 
 
+def decode_switchres(data: bytes) -> str:
+    if len(data) < 25:
+        return f"GTSR reply too short ({len(data)} bytes): {data.hex()}"
+    pclk_khz, = struct.unpack_from("<I", data, 4)
+    n = data[8]
+    pclk_out, = struct.unpack_from("<I", data, 9)
+    idiv, fbdiv, odiv = data[13], data[14], data[15]
+    achieved, = struct.unpack_from("<I", data, 16)
+    ok = data[20]
+    h_total, = struct.unpack_from("<H", data, 21)
+    v_total, = struct.unpack_from("<H", data, 23)
+    return (f"SWITCHRES: pclk={pclk_khz} kHz, superres x{n} -> {pclk_out} kHz | "
+            f"PLL idiv={idiv} fbdiv={fbdiv} odiv={odiv} -> {achieved} kHz (ok={ok}) | "
+            f"modeline h_total={h_total} v_total={v_total}")
+
+
 def decode_reply(data: bytes) -> str:
+    if len(data) >= 4 and data[:4] == b"GTSR":
+        return decode_switchres(data)
     if len(data) >= 4 and data[:4] == b"GTF1":
         return decode_features(data)
     if len(data) == 1:
@@ -83,6 +102,8 @@ def build(args) -> bytes:
         return struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, args.field, args.vsync)
     if c == "features":                           # v2.0.0: 1-byte request
         return struct.pack("<B", CMD_GET_FEATURES)
+    if c == "srresult":                           # v2.0.0 debug: read switchres math
+        return struct.pack("<B", CMD_GET_SWITCHRES_RESULT)
     raise SystemExit("unknown command")
 
 
@@ -94,6 +115,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("close"); sub.add_parser("version"); sub.add_parser("status")
     sub.add_parser("features")   # v2.0.0 capabilities query
+    sub.add_parser("srresult")   # v2.0.0 debug: read SWITCHRES mode-change math
     i = sub.add_parser("init")
     i.add_argument("--lz4", type=int, default=0)
     i.add_argument("--rate", type=int, default=0, help="0/22050/44100/48000")
@@ -113,7 +135,7 @@ def main():
     args = p.parse_args()
 
     pkt = build(args)
-    expects_reply = args.cmd in ("init", "status", "version", "blit", "features")
+    expects_reply = args.cmd in ("init", "status", "version", "blit", "features", "srresult")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(args.timeout)

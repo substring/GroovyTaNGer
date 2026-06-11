@@ -42,7 +42,8 @@ module groovy_packet_parser (
     output reg         get_status_valid,
     output reg         blit_valid,
     output reg         get_version_valid,
-    output reg         get_features_valid,   // v2.0.0 extension (CMD_GET_FEATURES)
+    output reg         get_features_valid,    // v2.0.0 extension (CMD_GET_FEATURES)
+    output reg         get_switchres_valid,   // v2.0.0 debug (CMD_GET_SWITCHRES_RESULT)
 
     // CMD_INIT fields
     output reg  [7:0]  init_lz4,
@@ -81,6 +82,7 @@ module groovy_packet_parser (
     localparam CMD_BLIT_FIELD_VSYNC = 8'd7;
     localparam CMD_GET_VERSION      = 8'd8;
     localparam CMD_GET_FEATURES     = 8'd9;   // Groovy_Tang v2.0.0 extension
+    localparam CMD_GET_SWITCHRES_RESULT = 8'd10;  // v2.0.0 debug: read mode-change math
 
     // Byte buffer (max control packet = SWITCHRES = 26 bytes)
     reg [7:0] pkt [0:25];
@@ -99,9 +101,10 @@ module groovy_packet_parser (
         audio_valid       <= 1'b0;
         get_status_valid  <= 1'b0;
         blit_valid         <= 1'b0;
-        get_version_valid  <= 1'b0;
-        get_features_valid <= 1'b0;
-        bad_packet         <= 1'b0;
+        get_version_valid   <= 1'b0;
+        get_features_valid  <= 1'b0;
+        get_switchres_valid <= 1'b0;
+        bad_packet          <= 1'b0;
 
         if (rst) begin
             wptr           <= 6'd0;
@@ -187,6 +190,9 @@ module groovy_packet_parser (
                     end
                     CMD_GET_FEATURES: begin  // v2.0.0 extension: 1-byte request
                         if (len == 6'd1) get_features_valid <= 1'b1; else bad_packet <= 1'b1;
+                    end
+                    CMD_GET_SWITCHRES_RESULT: begin  // v2.0.0 debug: 1-byte request
+                        if (len == 6'd1) get_switchres_valid <= 1'b1; else bad_packet <= 1'b1;
                     end
                     default: bad_packet <= 1'b1;  // includes deprecated CMD_BLIT_VSYNC=6
                 endcase
