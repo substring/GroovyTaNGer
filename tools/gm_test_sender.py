@@ -96,6 +96,45 @@ def gen_frame(w: int, h: int) -> bytes:
     return bytes(buf)
 
 
+def gen_frame_anim(w: int, h: int, phase: int) -> bytes:
+    # gradient background + a 4px white vertical bar sweeping across (motion test).
+    barx = phase % w
+    buf = bytearray()
+    for y in range(h):
+        g6 = (y * 63) // (h - 1) if h > 1 else 0
+        for x in range(w):
+            if abs(x - barx) < 2:
+                pix = 0xFFFF
+            else:
+                r5 = (x * 31) // (w - 1) if w > 1 else 0
+                pix = (r5 << 11) | (g6 << 5)
+            buf += struct.pack("<H", pix)
+    return bytes(buf)
+
+
+def send_blitstream(sock, addr, args):
+    # continuous frames -> exercises the double buffer (smooth, no tearing).
+    sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)
+    sock.setblocking(False)
+    period = 1.0 / args.fps if args.fps > 0 else 0.0
+    ch = args.chunk & ~1
+    for i in range(args.frames):
+        t0 = time.time()
+        sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, i + 1, 0, 0), addr)
+        frame = gen_frame_anim(args.width, args.height, i)
+        for off in range(0, len(frame), ch):
+            sock.sendto(frame[off:off+ch], addr)
+            if args.delay > 0: time.sleep(args.delay)
+        try:
+            while True: sock.recv(64)          # drain ACKs
+        except BlockingIOError:
+            pass
+        dt = time.time() - t0
+        if dt < period: time.sleep(period - dt)
+    print(f"blitstream: {args.frames} frames {args.width}x{args.height} "
+          f"@~{args.fps}fps (delay={args.delay}s) -> {addr[0]}:{addr[1]}")
+
+
 def send_blitimg(sock, addr, args):
     # 1) INIT rgb565 (rgbMode=2), 2) CMD_BLIT header, 3) pixel datagrams.
     sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)
@@ -167,17 +206,24 @@ def main():
     b.add_argument("--field", type=int, default=0)
     b.add_argument("--vsync", type=int, default=0)
     bi = sub.add_parser("blitimg")    # INIT(rgb565) + BLIT header + a test frame
-    bi.add_argument("--width", type=int, default=160)
-    bi.add_argument("--height", type=int, default=90)
+    bi.add_argument("--width", type=int, default=100)
+    bi.add_argument("--height", type=int, default=75)
     bi.add_argument("--frame", type=int, default=1)
     bi.add_argument("--chunk", type=int, default=1440)
     bi.add_argument("--delay", type=float, default=0.002, help="seconds between datagrams")
+    bs = sub.add_parser("blitstream")  # continuous animated frames (double-buffer test)
+    bs.add_argument("--width", type=int, default=100)
+    bs.add_argument("--height", type=int, default=75)
+    bs.add_argument("--frames", type=int, default=600)
+    bs.add_argument("--fps", type=float, default=30.0)
+    bs.add_argument("--chunk", type=int, default=1440)
+    bs.add_argument("--delay", type=float, default=0.001, help="seconds between datagrams")
     args = p.parse_args()
 
-    if args.cmd == "blitimg":
+    if args.cmd in ("blitimg", "blitstream"):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(args.timeout)
-        send_blitimg(sock, (args.host, args.port), args)
+        (send_blitimg if args.cmd == "blitimg" else send_blitstream)(sock, (args.host, args.port), args)
         return
 
     pkt = build(args)

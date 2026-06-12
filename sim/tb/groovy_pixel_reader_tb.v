@@ -22,7 +22,7 @@ module groovy_pixel_reader_tb;
     groovy_pixel_reader #(.ADDR_W(4)) dut (
         .clk(clk), .hcount(hcount), .vcount(vcount),
         .de(de), .hsync(hsync), .vsync(vsync),
-        .native_w(native_w), .recip_h(recip_h), .recip_v(recip_v),
+        .native_w(native_w), .recip_h(recip_h), .recip_v(recip_v), .bank_off(4'd0),
         .raddr(raddr), .rdata(rdata), .r(r), .g(g), .b(b),
         .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o));
 
@@ -49,7 +49,7 @@ module groovy_pixel_reader_tb;
             @(negedge clk); de=0; hcount=0;            // blanking
             @(negedge clk);
         end
-        repeat (4) @(negedge clk);
+        repeat (8) @(negedge clk);
 
         if (cap !== 32) begin $display("FAIL: captured %0d px exp 32", cap); errors=errors+1; end
         for (oy=0; oy<4; oy=oy+1)

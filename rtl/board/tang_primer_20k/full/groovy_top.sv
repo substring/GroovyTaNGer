@@ -230,9 +230,9 @@ module groovy_top (
 
     always_ff @(posedge clk or negedge rst) begin
         if (!rst) begin
-            v_idiv<=7'd4; v_fbdiv<=7'd55; v_odiv<=8'd2;
-            v_ha<=1280; v_hb<=1390; v_he<=1430; v_ht<=1650;
-            v_va<=720;  v_vb<=725;  v_ve<=730;  v_vt<=750;
+            v_idiv<=7'd5; v_fbdiv<=7'd37; v_odiv<=8'd4;  // 800x600: 27*37/5=199.8MHz serial
+            v_ha<=800;  v_hb<=840;  v_he<=968;  v_ht<=1056; //   -> /5 = 39.96 MHz pixel
+            v_va<=600;  v_vb<=601;  v_ve<=605;  v_vt<=628;
             video_rst<=1'b1; settle<=17'd0;
         end else begin
             if (new_mode) begin
@@ -268,15 +268,22 @@ module groovy_top (
     // to the 720p output. (Output stays at the default 720p; do not send SWITCHRES
     // for this test.) bytes_len = native_pixels * bpp. TODO: drive native size +
     // scale from SWITCHRES (and use DDR3 for full-size frames).
-    localparam integer NATIVE_W   = 160;
-    localparam integer NATIVE_PIX = 14400;     // 160 * 90
+    // Output 800x600@60 (40 MHz pixel) instead of 720p (74.25 MHz): the lower clock
+    // gives the read path enough timing margin to be glitch-free on the GW2A.
+    // Native 100x75 scaled x8 -> 800x600 (also a smaller, faster framebuffer).
+    localparam integer NATIVE_W   = 100;
+    localparam integer NATIVE_PIX = 7500;      // 100 * 75
     localparam [16:0]  RECIP_H = 17'd8192, RECIP_V = 17'd8192;  // ceil(65536/8) = x8
-    localparam integer FB_ADDR_W = 14;         // 2^14 > 14400
+    localparam integer FB_ADDR_W = 13;         // 2^13 > 7500
 
     wire [31:0]          bytes_len = NATIVE_PIX * cfg_bpp;
     wire                 fb_we, frame_done;
-    wire [FB_ADDR_W-1:0] fb_waddr, fb_raddr;
+    wire [FB_ADDR_W-1:0] fb_waddr;
+    wire [FB_ADDR_W:0]   fb_raddr;          // 15-bit: includes the bank base
     wire [15:0]          fb_wdata, fb_rdata;
+    wire                 frame_start_w;     // from video_timing_gen (below)
+    wire        de, hsync, vsync;            // from video_timing_gen (below)
+    wire [15:0] hcount, vcount;
 
     groovy_blit_rx #(.ADDR_W(FB_ADDR_W)) u_blit (
         .clk(clk50m), .rst(core_rst),
@@ -285,26 +292,77 @@ module groovy_top (
         .blitting(blitting), .frame_done(frame_done), .bytes_recv(),
         .wr_en(fb_we), .wr_addr(fb_waddr), .wr_data(fb_wdata));
 
-    groovy_vram #(.DEPTH(NATIVE_PIX), .ADDR_W(FB_ADDR_W)) u_vram (
-        .clk_w(clk50m), .we(fb_we), .waddr(fb_waddr), .wdata(fb_wdata),
+    // ---- double buffer with frameskip ----
+    // Write to the non-displayed bank. After a frame completes the writer STALLS
+    // (can_write low) until the display swaps to it at vsync (freeing the old
+    // bank). Frames arriving during the stall are still DRAINED by blit_rx (so
+    // their pixels never reach the parser) but not written and don't trigger a
+    // swap. Result: unconditional vsync swap (no freeze) + writer always idle at a
+    // swap (no mid-write glitch). can_write is level-based (writes==swaps).
+    logic       frame_rdy_tgl = 1'b0, blit_writes = 1'b0, swap_done_tgl = 1'b0;
+    logic [2:0] swd_s = 3'd0;
+    wire        can_write = (frame_rdy_tgl == swd_s[2]);   // a bank is free to write
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) begin frame_rdy_tgl<=1'b0; blit_writes<=1'b0; swd_s<=3'd0; end
+        else begin
+            swd_s <= {swd_s[1:0], swap_done_tgl};
+            if (blit_valid)                blit_writes   <= can_write;   // latch: does THIS blit write?
+            if (frame_done & blit_writes)  frame_rdy_tgl <= ~frame_rdy_tgl;
+        end
+
+    logic [1:0] db_s = 2'b11;                 // display_bank synced into clk50m
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) db_s<=2'b11; else db_s<={db_s[0], display_bank};
+    wire write_bank = ~db_s[1];               // write whatever isn't displayed
+
+    // Swap during VBLANK (vsync rising edge), NOT at frame_start (= first active
+    // pixel) - else display_bank/bank_off changes as the reader enters the visible
+    // region and the top rows read the wrong bank (top-of-screen glitch).
+    logic display_bank = 1'b1, pending = 1'b0, vsync_q = 1'b0;
+    logic [2:0] frt_s = 3'd0;
+    always_ff @(posedge pix_clk or negedge rst)
+        if (!rst) begin frt_s<=3'd0; display_bank<=1'b1; pending<=1'b0; swap_done_tgl<=1'b0; vsync_q<=1'b0; end
+        else begin
+            frt_s   <= {frt_s[1:0], frame_rdy_tgl};
+            vsync_q <= vsync;
+            if (frt_s[2]^frt_s[1]) pending<=1'b1;                 // a written frame is ready
+            if (vsync & ~vsync_q & pending) begin                // swap at vsync start (vblank)
+                display_bank<=~display_bank; pending<=1'b0; swap_done_tgl<=~swap_done_tgl;
+            end
+        end
+
+    // banks packed CONTIGUOUSLY (bank*NATIVE_PIX + addr) so both fit in DEPTH.
+    localparam [13:0] BANK_OFF = 14'd7500;    // = NATIVE_PIX
+    wire [13:0] w_off = write_bank   ? BANK_OFF : 14'd0;
+    wire [13:0] r_off = display_bank ? BANK_OFF : 14'd0;
+    groovy_vram #(.DEPTH(2*NATIVE_PIX), .ADDR_W(FB_ADDR_W+1)) u_vram (
+        .clk_w(clk50m), .we(fb_we & blit_writes), .waddr(w_off + {1'b0, fb_waddr}), .wdata(fb_wdata),
         .clk_r(pix_clk), .raddr(fb_raddr), .rdata(fb_rdata));
 
-    wire        de, hsync, vsync;
-    wire [15:0] hcount, vcount;
+    // Resample the modeline into pix_clk. v_* are driven by the 27 MHz reconfig
+    // FSM (far route + 16-bit compares against hcount = a 74 MHz setup violation);
+    // they're stable while video runs, so a plain resample makes the timing-gen
+    // comparisons pix_clk-local and meets timing.
+    logic [15:0] p_ht, p_ha, p_hb, p_he, p_vt, p_va, p_vb, p_ve;
+    always_ff @(posedge pix_clk) begin
+        p_ht<=v_ht; p_ha<=v_ha; p_hb<=v_hb; p_he<=v_he;
+        p_vt<=v_vt; p_va<=v_va; p_vb<=v_vb; p_ve<=v_ve;
+    end
+
     video_timing_gen u_timing (
         .clk(pix_clk), .rst(video_rst), .en(1'b1),
-        .h_total(v_ht), .h_active(v_ha), .h_sync_begin(v_hb), .h_sync_end(v_he),
-        .v_total(v_vt), .v_active(v_va), .v_sync_begin(v_vb), .v_sync_end(v_ve),
+        .h_total(p_ht), .h_active(p_ha), .h_sync_begin(p_hb), .h_sync_end(p_he),
+        .v_total(p_vt), .v_active(p_va), .v_sync_begin(p_vb), .v_sync_end(p_ve),
         .h_sync_pos(1'b1), .v_sync_pos(1'b1),   // TODO: polarity from modeline
         .hcount(hcount), .vcount(vcount), .hsync(hsync), .vsync(vsync), .de(de),
-        .line_start(), .frame_start());
+        .line_start(), .frame_start(frame_start_w));
 
     wire [7:0] r, g, b;
     wire       de_o, hs_o, vs_o;
-    groovy_pixel_reader #(.ADDR_W(FB_ADDR_W)) u_reader (
+    groovy_pixel_reader #(.ADDR_W(FB_ADDR_W+1)) u_reader (
         .clk(pix_clk), .hcount(hcount), .vcount(vcount),
         .de(de), .hsync(hsync), .vsync(vsync),
-        .native_w(NATIVE_W[11:0]), .recip_h(RECIP_H), .recip_v(RECIP_V),
+        .native_w(NATIVE_W[11:0]), .recip_h(RECIP_H), .recip_v(RECIP_V), .bank_off(r_off),
         .raddr(fb_raddr), .rdata(fb_rdata),
         .r(r), .g(g), .b(b), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o));
 

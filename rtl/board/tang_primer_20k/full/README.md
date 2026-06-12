@@ -52,21 +52,25 @@ Expect the monitor to switch resolution to each, still showing our color bars.
 LEDs (active-low, bit index = physical Dock LED): `[5]`=heartbeat `[4]`=eth ready
 `[3]`=rx_seen `[2]`=session `[1]`=pix_clk alive `[0]`=**frame received**.
 
-## Rung 5 — first picture from the PC (BLIT pixels -> VRAM -> scaler -> HDMI)
-First-picture path: a **fixed 160x90 native frame** is stored in BRAM and scaled
-**x8** (shift 3) to the **720p** output (so we sidestep DDR3 and sync polarity).
-`groovy_blit_rx` accumulates the pixel datagrams to `bytes_len = 160*90*bpp`,
-`groovy_vram` is the framebuffer, `groovy_pixel_reader` upscales it to the raster.
-Do **not** send SWITCHRES for this test (output stays at the default 720p).
+## Rung 5 — network video (BLIT pixels -> double-buffered VRAM -> scaler -> HDMI)
+Default output is **800x600@60 (~40 MHz pixel)** with a **100x75 native** frame
+scaled **x8** to fill it. `groovy_blit_rx` accumulates pixel datagrams to
+`bytes_len = 100*75*bpp`, two VRAM banks ping-pong (write one / display the other,
+swap in vblank, frameskip), and `groovy_pixel_reader` (5-stage pipelined) upscales
+to the raster. Do **not** send SWITCHRES for this (output stays at the default).
+
+Why 800x600 not 720p: at 74.25 MHz the read+BRAM path is too tight on the GW2A and
+pixels flicker; 40 MHz has the margin to be clean. (DDR3 + higher res is later.)
 
 ```bash
-# board .14, PC .15 (re-add 192.168.15.15 after sleep!). Send a test frame:
-python3 tools/gm_test_sender.py --host 192.168.15.14 blitimg
+# board .14, PC .15 (re-add 192.168.15.15 after sleep!).
+python3 tools/gm_test_sender.py --host 192.168.15.14 blitimg     # one 100x75 frame
+python3 tools/gm_test_sender.py --host 192.168.15.14 blitstream  # continuous (animated bar)
 ```
-Expect on the monitor: a **160x90 gradient** upscaled to 720p — red increasing
-left->right, green top->bottom, an **8x8 white square at the top-left** (origin).
-`led[0]` lights when the full frame is received. (`blitimg` sends INIT rgb565 +
-BLIT header + the 28800-byte frame in datagrams.)
+Expect: a **gradient** (red ->right, green ->down, 8x8 white origin marker) for
+`blitimg`, and a **smooth white bar sweeping** for `blitstream` - stable, no tearing
+or flicker. `led[0]` lights when a full frame is received. (`blitimg` = INIT rgb565
++ BLIT header + the 15000-byte frame; `blitstream` paces frames continuously.)
 
 Limitations (next steps): fixed 160x90 + power-of-2 scale (arbitrary super-res N
 and SWITCHRES-driven sizing TODO); single-buffer (tearing) -> beam-racing; BRAM

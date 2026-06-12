@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Groovy_Tang - framebuffer read + integer scaler (Rung 5), ARBITRARY N.
+// Groovy_Tang - framebuffer read + integer scaler (Rung 5), arbitrary N, DEEPLY
+// PIPELINED so the read path has large timing slack (the 74 MHz pixel clock plus
+// a ~460 Kb dual-bank BRAM is tight on the GW2A; pipelining absorbs placement/
+// routing variance that otherwise causes intermittent pixel glitches).
 //
-// Maps each output pixel back to a source pixel by a reciprocal multiply
-// (no division, any integer N >= 1):
-//   src_x = (out_x * recip_h) >> 16,  src_y = (out_y * recip_v) >> 16
-// where recip = ceil(65536 / N). For N=8 recip=8192 (== >>3); for N=3 recip=21846.
-// This is the super-res replicator (each native pixel repeated N_h across) plus
-// vertical scan-multiply (N_v). For a real CRT set N_v=1 (recip_v=65536).
+//   src = (out * recip) >> 16   (recip = ceil(65536/N); for N=8 recip=8192 == >>3)
+//   addr = src_y * native_w + src_x + bank_off
 //
-// 3-stage pipeline (src -> addr -> VRAM read); de/hs/vs delayed 3 cycles to stay
-// aligned (a harmless few-pixel shift). RGB565 -> RGB888 on output.
+// 5 stages: (1) source coords, (2) multiply, (3) add, (4) route register to the
+// BRAM, (5) BRAM read. de/hs/vs delayed 5 cycles to stay aligned. RGB565->RGB888.
 `default_nettype none
 
 module groovy_pixel_reader #(
@@ -21,9 +20,10 @@ module groovy_pixel_reader #(
     input  wire        de,
     input  wire        hsync,
     input  wire        vsync,
-    input  wire [11:0] native_w,       // source width (pixels)
+    input  wire [11:0] native_w,
     input  wire [16:0] recip_h,        // ceil(65536 / N_h)
     input  wire [16:0] recip_v,        // ceil(65536 / N_v)
+    input  wire [ADDR_W-1:0] bank_off,
     output wire [ADDR_W-1:0] raddr,
     input  wire [15:0]       rdata,
     output wire [7:0]  r,
@@ -36,20 +36,25 @@ module groovy_pixel_reader #(
     wire [32:0] sx_c = (hcount * recip_h) >> 16;
     wire [32:0] sy_c = (vcount * recip_v) >> 16;
 
-    reg [15:0] sx, sy;
-    reg [ADDR_W-1:0] raddr_r;
-    reg de1, hs1, vs1, de2, hs2, vs2;
+    // stage 1: source coords
+    reg [15:0] sx1, sy1;  reg [ADDR_W-1:0] bo1;  reg de1, hs1, vs1;
+    // stage 2: multiply
+    reg [27:0] mul2;  reg [15:0] sx2;  reg [ADDR_W-1:0] bo2;  reg de2, hs2, vs2;
+    // stage 3: add
+    reg [ADDR_W-1:0] raddr3;  reg de3, hs3, vs3;
+    // stage 4: route register feeding the BRAM
+    reg [ADDR_W-1:0] raddr_r;  reg de4, hs4, vs4;
+
     always @(posedge clk) begin
-        // stage 1: source coords
-        sx<=sx_c[15:0]; sy<=sy_c[15:0]; de1<=de; hs1<=hsync; vs1<=vsync;
-        // stage 2: linear address (uses the stage-1 registers)
-        raddr_r <= (sy * native_w + sx);
-        de2<=de1; hs2<=hs1; vs2<=vs1;
-        // stage 3: aligns with the VRAM read of raddr_r
-        de_o<=de2; hs_o<=hs2; vs_o<=vs2;
+        sx1<=sx_c[15:0]; sy1<=sy_c[15:0]; bo1<=bank_off; de1<=de;  hs1<=hsync; vs1<=vsync;
+        mul2<=sy1*native_w; sx2<=sx1; bo2<=bo1;          de2<=de1; hs2<=hs1;  vs2<=vs1;
+        raddr3<=mul2[ADDR_W-1:0]+sx2+bo2;                de3<=de2; hs3<=hs2;  vs3<=vs2;
+        raddr_r<=raddr3;                                 de4<=de3; hs4<=hs3;  vs4<=vs3;
+        de_o<=de4; hs_o<=hs4; vs_o<=vs4;                 // stage 5 (aligns w/ BRAM)
     end
     assign raddr = raddr_r;
 
+    // rdata = mem[raddr_r] one cycle after raddr_r (stage 5), gated by de_o
     assign r = de_o ? {rdata[15:11], 3'b000} : 8'd0;
     assign g = de_o ? {rdata[10:5],  2'b00} : 8'd0;
     assign b = de_o ? {rdata[4:0],   3'b000} : 8'd0;
