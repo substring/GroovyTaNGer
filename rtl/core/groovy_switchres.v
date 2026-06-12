@@ -44,6 +44,7 @@ module groovy_switchres (
     output reg  [6:0]  idiv,
     output reg  [6:0]  fbdiv,
     output reg  [7:0]  odiv,
+    output reg  [3:0]  superres_n,     // horizontal super-res factor used
     output reg  [31:0] achieved_khz,
     output reg         ok
 );
@@ -84,7 +85,7 @@ module groovy_switchres (
         result_valid <= 1'b0;
         if (rst) begin
             l_pclk<=0; l_pout<=0; l_n<=0; l_ht<=0; l_vt<=0;
-            idiv<=0; fbdiv<=0; odiv<=0; achieved_khz<=0; ok<=0;
+            idiv<=0; fbdiv<=0; odiv<=0; superres_n<=0; achieved_khz<=0; ok<=0;
         end else begin
             if (start_slow) begin
                 l_pclk <= pclk_khz_c; l_pout <= pclk_out_c; l_n <= n_c;
@@ -92,6 +93,7 @@ module groovy_switchres (
             end
             if (solver_done) begin
                 idiv <= s_idiv; fbdiv <= s_fbdiv; odiv <= s_odiv;
+                superres_n <= l_n;
                 achieved_khz <= s_ach / 32'd5;   // report achieved PIXEL clock
                 ok <= solver_ok; result_valid <= 1'b1;
             end
