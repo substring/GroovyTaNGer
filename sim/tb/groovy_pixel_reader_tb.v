@@ -6,7 +6,7 @@ module groovy_pixel_reader_tb;
     reg  [15:0] hcount, vcount;
     reg         de, hsync, vsync;
     reg  [11:0] native_w;
-    reg  [3:0]  shift_h, shift_v;
+    reg  [16:0] recip_h, recip_v;
     wire [3:0]  raddr;
     wire [15:0] rdata;
     wire [7:0]  r,g,b;
@@ -22,7 +22,7 @@ module groovy_pixel_reader_tb;
     groovy_pixel_reader #(.ADDR_W(4)) dut (
         .clk(clk), .hcount(hcount), .vcount(vcount),
         .de(de), .hsync(hsync), .vsync(vsync),
-        .native_w(native_w), .shift_h(shift_h), .shift_v(shift_v),
+        .native_w(native_w), .recip_h(recip_h), .recip_v(recip_v),
         .raddr(raddr), .rdata(rdata), .r(r), .g(g), .b(b),
         .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o));
 
@@ -36,7 +36,7 @@ module groovy_pixel_reader_tb;
 
     initial begin
         de=0; we=0; hsync=0; vsync=0; hcount=0; vcount=0;
-        native_w=12'd4; shift_h=4'd1; shift_v=4'd1;
+        native_w=12'd4; recip_h=17'd32768; recip_v=17'd32768;   // N=2 (ceil(65536/2))
         @(negedge clk); @(negedge clk);
 
         for (i=0;i<8;i=i+1) wr(i[3:0], i[4:0]<<11);   // mem[i] r=i

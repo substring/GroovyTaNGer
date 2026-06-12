@@ -76,7 +76,7 @@ module groovy_top (
                 1: begin rx_head_rdy <= 1'b1; req_ip   <= rx_head;        hstate <= 2; end
                 2: begin rx_head_rdy <= 1'b1;                             hstate <= 3; end
                 3: begin rx_head_rdy <= 1'b1; req_port <= rx_head[31:16]; hstate <= 4; end
-                4: if (!rx_head_av) hstate <= 0;
+                4: if (!rx_head_av) hstate <= 0;   // re-arm after the head FIFO drains
                 default: hstate <= 0;
             endcase
         end
@@ -270,7 +270,7 @@ module groovy_top (
     // scale from SWITCHRES (and use DDR3 for full-size frames).
     localparam integer NATIVE_W   = 160;
     localparam integer NATIVE_PIX = 14400;     // 160 * 90
-    localparam [3:0]   SHIFT_H = 4'd3, SHIFT_V = 4'd3;
+    localparam [16:0]  RECIP_H = 17'd8192, RECIP_V = 17'd8192;  // ceil(65536/8) = x8
     localparam integer FB_ADDR_W = 14;         // 2^14 > 14400
 
     wire [31:0]          bytes_len = NATIVE_PIX * cfg_bpp;
@@ -304,12 +304,13 @@ module groovy_top (
     groovy_pixel_reader #(.ADDR_W(FB_ADDR_W)) u_reader (
         .clk(pix_clk), .hcount(hcount), .vcount(vcount),
         .de(de), .hsync(hsync), .vsync(vsync),
-        .native_w(NATIVE_W[11:0]), .shift_h(SHIFT_H), .shift_v(SHIFT_V),
+        .native_w(NATIVE_W[11:0]), .recip_h(RECIP_H), .recip_v(RECIP_V),
         .raddr(fb_raddr), .rdata(fb_rdata),
         .r(r), .g(g), .b(b), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o));
 
-    // native raster line into clk50m for the ACK vCount (beam-race feedback)
-    always_ff @(posedge clk50m) vcount_50 <= vcount >> SHIFT_V;
+    // native raster line into clk50m for the ACK vCount (beam-race feedback).
+    // /8 matches the x8 vertical scale (RECIP_V); generalize with the modeline later.
+    always_ff @(posedge clk50m) vcount_50 <= vcount >> 3;
 
     DVI_TX_Top u_dvi (
         .I_rst_n(~video_rst), .I_serial_clk(serial_clk), .I_rgb_clk(pix_clk),

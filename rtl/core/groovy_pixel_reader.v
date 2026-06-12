@@ -1,21 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Groovy_Tang - framebuffer read + integer scaler (Rung 5).
+// Groovy_Tang - framebuffer read + integer scaler (Rung 5), ARBITRARY N.
 //
-// Walks the output raster (hcount/vcount from video_timing_gen) and maps each
-// output pixel back to a source pixel by power-of-two integer division:
-//   src_x = out_x >> shift_h,  src_y = out_y >> shift_v
-// i.e. each native pixel is repeated 2^shift_h across (horizontal super-res) and
-// each native line 2^shift_v down (scan-multiply), so a small native frame fills
-// a standard output mode (e.g. 160x90 with shift=3 -> 1280x720). For a real CRT
-// use shift_v=0 (native lines preserved).
+// Maps each output pixel back to a source pixel by a reciprocal multiply
+// (no division, any integer N >= 1):
+//   src_x = (out_x * recip_h) >> 16,  src_y = (out_y * recip_v) >> 16
+// where recip = ceil(65536 / N). For N=8 recip=8192 (== >>3); for N=3 recip=21846.
+// This is the super-res replicator (each native pixel repeated N_h across) plus
+// vertical scan-multiply (N_v). For a real CRT set N_v=1 (recip_v=65536).
 //
-// Addressing is combinational from hcount/vcount (no per-line counter -> no
-// line-start/de coincidence hazard). 2-stage pipeline: (1) registered
-// src_y*native_w+src_x, (2) registered VRAM read. de/hs/vs are delayed 2 cycles
-// to stay aligned. RGB565 -> RGB888 on output.
-//
-// NOTE: power-of-two scale only (good for the first-picture path). Arbitrary
-// super-res N (3,5,6...) needs a fractional accumulator - a later refinement.
+// 3-stage pipeline (src -> addr -> VRAM read); de/hs/vs delayed 3 cycles to stay
+// aligned (a harmless few-pixel shift). RGB565 -> RGB888 on output.
 `default_nettype none
 
 module groovy_pixel_reader #(
@@ -28,8 +22,8 @@ module groovy_pixel_reader #(
     input  wire        hsync,
     input  wire        vsync,
     input  wire [11:0] native_w,       // source width (pixels)
-    input  wire [3:0]  shift_h,        // log2 horizontal scale
-    input  wire [3:0]  shift_v,        // log2 vertical scale
+    input  wire [16:0] recip_h,        // ceil(65536 / N_h)
+    input  wire [16:0] recip_v,        // ceil(65536 / N_v)
     output wire [ADDR_W-1:0] raddr,
     input  wire [15:0]       rdata,
     output wire [7:0]  r,
@@ -39,20 +33,23 @@ module groovy_pixel_reader #(
     output reg         hs_o,
     output reg         vs_o
 );
-    wire [15:0] src_x = hcount >> shift_h;
-    wire [15:0] src_y = vcount >> shift_v;
-    wire [31:0] addr  = src_y * native_w + src_x;
+    wire [32:0] sx_c = (hcount * recip_h) >> 16;
+    wire [32:0] sy_c = (vcount * recip_v) >> 16;
 
+    reg [15:0] sx, sy;
     reg [ADDR_W-1:0] raddr_r;
-    reg de1, hs1, vs1;
+    reg de1, hs1, vs1, de2, hs2, vs2;
     always @(posedge clk) begin
-        raddr_r <= addr[ADDR_W-1:0];     // stage 1: registered address (+multiply)
-        de1<=de;   hs1<=hsync; vs1<=vsync;
-        de_o<=de1; hs_o<=hs1;  vs_o<=vs1; // stage 2: align with VRAM read latency
+        // stage 1: source coords
+        sx<=sx_c[15:0]; sy<=sy_c[15:0]; de1<=de; hs1<=hsync; vs1<=vsync;
+        // stage 2: linear address (uses the stage-1 registers)
+        raddr_r <= (sy * native_w + sx);
+        de2<=de1; hs2<=hs1; vs2<=vs1;
+        // stage 3: aligns with the VRAM read of raddr_r
+        de_o<=de2; hs_o<=hs2; vs_o<=vs2;
     end
     assign raddr = raddr_r;
 
-    // rdata = mem[raddr_r] one cycle later; gate with the 2-delayed de
     assign r = de_o ? {rdata[15:11], 3'b000} : 8'd0;
     assign g = de_o ? {rdata[10:5],  2'b00} : 8'd0;
     assign b = de_o ? {rdata[4:0],   3'b000} : 8'd0;
