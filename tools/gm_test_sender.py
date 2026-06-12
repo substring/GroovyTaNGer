@@ -14,7 +14,7 @@
 #       --hactive 640 --hbegin 656 --hend 752 --htotal 800 \
 #       --vactive 480 --vbegin 490 --vend 492 --vtotal 525 --interlace 0
 #   gm_test_sender.py --host 192.168.1.59 blit --frame 1 --field 0 --vsync 0
-import argparse, socket, struct, sys
+import argparse, socket, struct, sys, time
 
 DATA_PORT = 32100
 
@@ -80,6 +80,40 @@ def decode_reply(data: bytes) -> str:
             f"| fpga frame={frame} vCount={vCount} | status=0x{status:02x} [{flags}]")
 
 
+def gen_frame(w: int, h: int) -> bytes:
+    # RGB565 test image: red gradient left->right, green top->bottom, B=0,
+    # plus an 8x8 white square at the top-left as an origin/orientation marker.
+    buf = bytearray()
+    for y in range(h):
+        for x in range(w):
+            if x < 8 and y < 8:
+                pix = 0xFFFF
+            else:
+                r5 = (x * 31) // (w - 1) if w > 1 else 0
+                g6 = (y * 63) // (h - 1) if h > 1 else 0
+                pix = (r5 << 11) | (g6 << 5)
+            buf += struct.pack("<H", pix)            # little-endian RGB565
+    return bytes(buf)
+
+
+def send_blitimg(sock, addr, args):
+    # 1) INIT rgb565 (rgbMode=2), 2) CMD_BLIT header, 3) pixel datagrams.
+    sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)
+    try: print(decode_reply(sock.recvfrom(64)[0]))         # INIT ACK
+    except socket.timeout: print("(no INIT ack)")
+    sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, 0, 0), addr)
+    try: print(decode_reply(sock.recvfrom(64)[0]))         # BLIT ACK
+    except socket.timeout: print("(no BLIT ack)")
+    frame = gen_frame(args.width, args.height)
+    ch = args.chunk & ~1                                    # keep pixels (2B) aligned
+    n = 0
+    for off in range(0, len(frame), ch):
+        sock.sendto(frame[off:off+ch], addr); n += 1
+        if args.delay > 0: time.sleep(args.delay)           # avoid overrunning UDP RX
+    print(f"blitimg: {args.width}x{args.height} = {len(frame)} bytes "
+          f"in {n} datagrams (delay={args.delay}s) -> {addr[0]}:{addr[1]}")
+
+
 def build(args) -> bytes:
     c = args.cmd
     if c == "close":
@@ -132,7 +166,19 @@ def main():
     b.add_argument("--frame", type=int, default=1)
     b.add_argument("--field", type=int, default=0)
     b.add_argument("--vsync", type=int, default=0)
+    bi = sub.add_parser("blitimg")    # INIT(rgb565) + BLIT header + a test frame
+    bi.add_argument("--width", type=int, default=160)
+    bi.add_argument("--height", type=int, default=90)
+    bi.add_argument("--frame", type=int, default=1)
+    bi.add_argument("--chunk", type=int, default=1440)
+    bi.add_argument("--delay", type=float, default=0.002, help="seconds between datagrams")
     args = p.parse_args()
+
+    if args.cmd == "blitimg":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(args.timeout)
+        send_blitimg(sock, (args.host, args.port), args)
+        return
 
     pkt = build(args)
     expects_reply = args.cmd in ("init", "status", "version", "blit", "features", "srresult")

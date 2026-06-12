@@ -49,5 +49,25 @@ python3 tools/gm_test_sender.py --host 192.168.15.14 switchres --pclk 65.0 \
 ```
 Expect the monitor to switch resolution to each, still showing our color bars.
 
-LEDs (active-low): `[5]`=heartbeat `[4]`=eth ready `[3]`=rx_seen `[2]`=session
-`[1]`=pix_clk alive `[0]`=video on (settled).
+LEDs (active-low, bit index = physical Dock LED): `[5]`=heartbeat `[4]`=eth ready
+`[3]`=rx_seen `[2]`=session `[1]`=pix_clk alive `[0]`=**frame received**.
+
+## Rung 5 — first picture from the PC (BLIT pixels -> VRAM -> scaler -> HDMI)
+First-picture path: a **fixed 160x90 native frame** is stored in BRAM and scaled
+**x8** (shift 3) to the **720p** output (so we sidestep DDR3 and sync polarity).
+`groovy_blit_rx` accumulates the pixel datagrams to `bytes_len = 160*90*bpp`,
+`groovy_vram` is the framebuffer, `groovy_pixel_reader` upscales it to the raster.
+Do **not** send SWITCHRES for this test (output stays at the default 720p).
+
+```bash
+# board .14, PC .15 (re-add 192.168.15.15 after sleep!). Send a test frame:
+python3 tools/gm_test_sender.py --host 192.168.15.14 blitimg
+```
+Expect on the monitor: a **160x90 gradient** upscaled to 720p — red increasing
+left->right, green top->bottom, an **8x8 white square at the top-left** (origin).
+`led[0]` lights when the full frame is received. (`blitimg` sends INIT rgb565 +
+BLIT header + the 28800-byte frame in datagrams.)
+
+Limitations (next steps): fixed 160x90 + power-of-2 scale (arbitrary super-res N
+and SWITCHRES-driven sizing TODO); single-buffer (tearing) -> beam-racing; BRAM
+only -> DDR3 for full-size arcade frames.

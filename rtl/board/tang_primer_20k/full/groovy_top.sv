@@ -103,10 +103,14 @@ module groovy_top (
     wire [15:0] blit_vsync;
     wire [63:0] sr_pclk;
     wire [15:0] sr_ha, sr_hb, sr_he, sr_ht, sr_va, sr_vb, sr_ve, sr_vt;
+    wire        blitting;          // from groovy_blit_rx (gates the parser)
+    wire [2:0]  cfg_bpp;           // bytes per pixel (from session/INIT)
 
+    // While blitting, datagrams are PIXELS not commands - gate them from the parser.
     groovy_packet_parser u_parser (
         .clk(clk50m), .rst(core_rst),
-        .in_valid(p_valid), .in_data(p_data), .in_sop(p_sop), .in_eop(p_eop),
+        .in_valid(p_valid & ~blitting), .in_data(p_data),
+        .in_sop(p_sop & ~blitting), .in_eop(p_eop & ~blitting),
         .cmd_valid(), .cmd(), .bad_packet(),
         .close_valid(close_valid), .init_valid(init_valid),
         .switchres_valid(switchres_valid), .audio_valid(), .get_status_valid(get_status_valid),
@@ -127,7 +131,7 @@ module groovy_top (
         .init_sound_rate(i_sr), .init_sound_chan(i_sc), .init_rgb_mode(i_rgb),
         .close_valid(close_valid), .session_active(session_active),
         .cfg_lz4(), .cfg_sound_rate(), .cfg_sound_chan(), .cfg_rgb_mode(),
-        .new_session(), .end_session(), .cfg_bytes_per_pixel()
+        .new_session(), .end_session(), .cfg_bytes_per_pixel(cfg_bpp)
     );
 
     wire        ack_start, ack_busy, ack_valid, ack_last, ack_ready;
@@ -135,12 +139,13 @@ module groovy_top (
     wire [31:0] ack_frame_echo, ack_fpga_frame;
     wire [15:0] ack_vsync_echo, ack_fpga_vcount;
     wire [7:0]  ack_status;
+    logic [15:0] vcount_50;        // video raster line, sampled into clk50m (loose CDC)
 
     groovy_ack_policy u_policy (
         .clk(clk50m), .rst(core_rst),
         .init_valid(init_valid), .get_status_valid(get_status_valid),
         .blit_valid(blit_valid), .blit_frame(blit_frame), .blit_vsync(blit_vsync),
-        .fpga_frame(32'd0), .fpga_vcount(ck50[15:0]), .status_bits(8'd0),
+        .fpga_frame(32'd0), .fpga_vcount(vcount_50), .status_bits(8'd0),
         .ack_busy(ack_busy), .ack_start(ack_start),
         .ack_frame_echo(ack_frame_echo), .ack_vsync_echo(ack_vsync_echo),
         .ack_fpga_frame(ack_fpga_frame), .ack_fpga_vcount(ack_fpga_vcount),
@@ -258,6 +263,32 @@ module groovy_top (
     CLKDIV u_div (.RESETN(rst), .HCLKIN(serial_clk), .CLKOUT(pix_clk), .CALIB(1'b1));
     defparam u_div.DIV_MODE="5"; defparam u_div.GSREN="false";
 
+    // ================= BLIT pixels -> VRAM -> scaler -> HDMI (Rung 5) =================
+    // FIRST-PICTURE path: fixed native 160x90 stored in BRAM, scaled x8 (shift 3)
+    // to the 720p output. (Output stays at the default 720p; do not send SWITCHRES
+    // for this test.) bytes_len = native_pixels * bpp. TODO: drive native size +
+    // scale from SWITCHRES (and use DDR3 for full-size frames).
+    localparam integer NATIVE_W   = 160;
+    localparam integer NATIVE_PIX = 14400;     // 160 * 90
+    localparam [3:0]   SHIFT_H = 4'd3, SHIFT_V = 4'd3;
+    localparam integer FB_ADDR_W = 14;         // 2^14 > 14400
+
+    wire [31:0]          bytes_len = NATIVE_PIX * cfg_bpp;
+    wire                 fb_we, frame_done;
+    wire [FB_ADDR_W-1:0] fb_waddr, fb_raddr;
+    wire [15:0]          fb_wdata, fb_rdata;
+
+    groovy_blit_rx #(.ADDR_W(FB_ADDR_W)) u_blit (
+        .clk(clk50m), .rst(core_rst),
+        .start(blit_valid), .bytes_len(bytes_len), .bytespp(cfg_bpp),
+        .in_valid(p_valid & blitting), .in_data(p_data),
+        .blitting(blitting), .frame_done(frame_done), .bytes_recv(),
+        .wr_en(fb_we), .wr_addr(fb_waddr), .wr_data(fb_wdata));
+
+    groovy_vram #(.DEPTH(NATIVE_PIX), .ADDR_W(FB_ADDR_W)) u_vram (
+        .clk_w(clk50m), .we(fb_we), .waddr(fb_waddr), .wdata(fb_wdata),
+        .clk_r(pix_clk), .raddr(fb_raddr), .rdata(fb_rdata));
+
     wire        de, hsync, vsync;
     wire [15:0] hcount, vcount;
     video_timing_gen u_timing (
@@ -269,12 +300,20 @@ module groovy_top (
         .line_start(), .frame_start());
 
     wire [7:0] r, g, b;
-    test_pattern_gen u_pat (.h_act(v_ha[11:0]), .v_act(v_va[11:0]),
-        .hcount(hcount), .vcount(vcount), .de(de), .r(r), .g(g), .b(b));
+    wire       de_o, hs_o, vs_o;
+    groovy_pixel_reader #(.ADDR_W(FB_ADDR_W)) u_reader (
+        .clk(pix_clk), .hcount(hcount), .vcount(vcount),
+        .de(de), .hsync(hsync), .vsync(vsync),
+        .native_w(NATIVE_W[11:0]), .shift_h(SHIFT_H), .shift_v(SHIFT_V),
+        .raddr(fb_raddr), .rdata(fb_rdata),
+        .r(r), .g(g), .b(b), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o));
+
+    // native raster line into clk50m for the ACK vCount (beam-race feedback)
+    always_ff @(posedge clk50m) vcount_50 <= vcount >> SHIFT_V;
 
     DVI_TX_Top u_dvi (
         .I_rst_n(~video_rst), .I_serial_clk(serial_clk), .I_rgb_clk(pix_clk),
-        .I_rgb_vs(vsync), .I_rgb_hs(hsync), .I_rgb_de(de),
+        .I_rgb_vs(vs_o), .I_rgb_hs(hs_o), .I_rgb_de(de_o),
         .I_rgb_r(r), .I_rgb_g(g), .I_rgb_b(b),
         .O_tmds_clk_p(O_tmds_clk_p),   .O_tmds_clk_n(O_tmds_clk_n),
         .O_tmds_data_p(O_tmds_data_p), .O_tmds_data_n(O_tmds_data_n));
@@ -283,6 +322,11 @@ module groovy_top (
     logic [24:0] pc;
     always_ff @(posedge pix_clk) pc <= pc + 25'd1;
 
-    // led[5]=heartbeat [4]=ready [3]=rx_seen [2]=session [1]=pix_alive [0]=video_on
-    assign led = ~{heartbeat, ready, rx_seen, session_active, pc[24], ~video_rst};
+    // latch "a full frame was received" (lights when a BLIT completes)
+    logic have_frame;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) have_frame <= 1'b0; else if (frame_done) have_frame <= 1'b1;
+
+    // led[5]=heartbeat [4]=ready [3]=rx_seen [2]=session [1]=pix_alive [0]=have_frame
+    assign led = ~{heartbeat, ready, rx_seen, session_active, pc[24], have_frame};
 endmodule

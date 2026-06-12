@@ -16,6 +16,9 @@
         <File path="../../../core/groovy_switchres.v" type="file.verilog" enable="1"/>
         <File path="../../../core/pclk_double_to_khz.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_pll_solver.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_blit_rx.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_vram.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_pixel_reader.v" type="file.verilog" enable="1"/>
         <File path="../../../generic/video/superres_factor.v" type="file.verilog" enable="1"/>
         <File path="../../../generic/video/video_timing_gen.v" type="file.verilog" enable="1"/>
         <File path="../../../generic/video/test_pattern_gen.v" type="file.verilog" enable="1"/>

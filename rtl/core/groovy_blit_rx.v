@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Groovy_Tang - BLIT pixel receiver (Rung 5). Strict to the Groovy_MiSTer model.
+//
+// Reference (extern/Groovy_MiSTer .../groovy.cpp): CMD_BLIT is a header-only
+// packet; the pixel data arrives in SEPARATE following datagrams and is
+// accumulated by byte count until bytes_recv >= bytes_len (= hactive*vactive*bpp).
+// While blitting, datagrams are DATA, not commands. We mirror that exactly: the
+// top routes RX bytes here (in_valid) only while blitting; this block assembles
+// `bytespp` bytes into a pixel, writes it to VRAM at the running pixel index, and
+// pulses frame_done when the whole frame has been received.
+//
+// Pixels are stored as RGB565 (16-bit) to fit BRAM. bytespp from INIT rgbMode:
+//   2 = RGB565 (wire: little-endian, byte0=low)   [first-picture path]
+//   3 = RGB888 (wire byte order R,G,B [A VERIFIER]) -> packed to 565
+// (rgbMode 1 = 4-byte RGBA is a later add.)
+`default_nettype none
+
+module groovy_blit_rx #(
+    parameter integer ADDR_W = 17           // pixels per framebuffer (<=131072)
+) (
+    input  wire                clk,
+    input  wire                rst,
+    input  wire                start,        // pulse: CMD_BLIT parsed -> begin
+    input  wire [31:0]         bytes_len,    // expected total bytes for the frame
+    input  wire [2:0]          bytespp,      // 2 or 3
+    input  wire                in_valid,     // a pixel byte (gated by top: blitting only)
+    input  wire [7:0]          in_data,
+
+    output reg                 blitting,
+    output reg                 frame_done,   // 1-cycle pulse at end of frame
+    output reg  [31:0]         bytes_recv,
+
+    output reg                 wr_en,        // 1-cycle per assembled pixel
+    output reg  [ADDR_W-1:0]   wr_addr,      // pixel index
+    output reg  [15:0]         wr_data       // RGB565
+);
+    reg [1:0]        bcnt;        // byte within the current pixel (0..bytespp-1)
+    reg [7:0]        b0, b1;      // gathered bytes
+    reg [ADDR_W-1:0] pix_idx;     // running pixel index
+
+    // pack the just-completed pixel to RGB565
+    function [15:0] pack565;
+        input [2:0] bpp; input [7:0] x0, x1, x2;
+    begin
+        if (bpp == 3'd2) pack565 = {x1, x0};                       // RGB565 LE
+        else             pack565 = {x0[7:3], x1[7:2], x2[7:3]};    // RGB888 -> 565
+    end
+    endfunction
+
+    always @(posedge clk) begin
+        wr_en      <= 1'b0;
+        frame_done <= 1'b0;
+        if (rst) begin
+            blitting<=1'b0; bytes_recv<=32'd0; bcnt<=2'd0; pix_idx<={ADDR_W{1'b0}};
+        end else if (start) begin
+            blitting<=1'b1; bytes_recv<=32'd0; bcnt<=2'd0; pix_idx<={ADDR_W{1'b0}};
+        end else if (blitting && in_valid) begin
+            bytes_recv <= bytes_recv + 32'd1;
+
+            // gather bytes into a pixel
+            if (bcnt == 2'd0)      b0 <= in_data;
+            else if (bcnt == 2'd1) b1 <= in_data;
+
+            if (bcnt == bytespp - 3'd1) begin       // last byte of this pixel
+                bcnt    <= 2'd0;
+                wr_en   <= 1'b1;
+                wr_addr <= pix_idx;                  // write at current index, then ++
+                wr_data <= (bytespp==3'd2) ? pack565(3'd2, b0, in_data, 8'd0)
+                                           : pack565(3'd3, b0, b1, in_data);
+                pix_idx <= pix_idx + {{(ADDR_W-1){1'b0}},1'b1};
+            end else begin
+                bcnt <= bcnt + 2'd1;
+            end
+
+            // end of frame (count includes this byte)
+            if (bytes_recv + 32'd1 >= bytes_len) begin
+                blitting   <= 1'b0;
+                frame_done <= 1'b1;
+            end
+        end
+    end
+endmodule
+
+`default_nettype wire
