@@ -140,12 +140,13 @@ module groovy_top (
     wire [15:0] ack_vsync_echo, ack_fpga_vcount;
     wire [7:0]  ack_status;
     logic [15:0] vcount_50;        // video raster line, sampled into clk50m (loose CDC)
+    wire [7:0]  beamrace_status;   // beam-race feedback for the host (bit0 = underrun)
 
     groovy_ack_policy u_policy (
         .clk(clk50m), .rst(core_rst),
         .init_valid(init_valid), .get_status_valid(get_status_valid),
         .blit_valid(blit_valid), .blit_frame(blit_frame), .blit_vsync(blit_vsync),
-        .fpga_frame(32'd0), .fpga_vcount(vcount_50), .status_bits(8'd0),
+        .fpga_frame(32'd0), .fpga_vcount(vcount_50), .status_bits(beamrace_status),
         .ack_busy(ack_busy), .ack_start(ack_start),
         .ack_frame_echo(ack_frame_echo), .ack_vsync_echo(ack_vsync_echo),
         .ack_fpga_frame(ack_fpga_frame), .ack_fpga_vcount(ack_fpga_vcount),
@@ -299,14 +300,19 @@ module groovy_top (
     // their pixels never reach the parser) but not written and don't trigger a
     // swap. Result: unconditional vsync swap (no freeze) + writer always idle at a
     // swap (no mid-write glitch). can_write is level-based (writes==swaps).
-    logic       frame_rdy_tgl = 1'b0, blit_writes = 1'b0, swap_done_tgl = 1'b0;
+    // beam_race (blit vSync>0): write AND display the SAME bank (no swap), so the
+    // raster chases the write -> sub-frame latency (host paces via the vCount ACK).
+    logic       frame_rdy_tgl = 1'b0, blit_writes = 1'b0, swap_done_tgl = 1'b0, beam_race = 1'b0;
     logic [2:0] swd_s = 3'd0;
     wire        can_write = (frame_rdy_tgl == swd_s[2]);   // a bank is free to write
     always_ff @(posedge clk50m or posedge core_rst)
-        if (core_rst) begin frame_rdy_tgl<=1'b0; blit_writes<=1'b0; swd_s<=3'd0; end
+        if (core_rst) begin frame_rdy_tgl<=1'b0; blit_writes<=1'b0; swd_s<=3'd0; beam_race<=1'b0; end
         else begin
             swd_s <= {swd_s[1:0], swap_done_tgl};
-            if (blit_valid)                blit_writes   <= can_write;   // latch: does THIS blit write?
+            if (blit_valid) begin
+                beam_race   <= (blit_vsync != 16'd0);                 // vSync>0 -> beam-race
+                blit_writes <= (blit_vsync != 16'd0) | can_write;     // beam-race always writes
+            end
             if (frame_done & blit_writes)  frame_rdy_tgl <= ~frame_rdy_tgl;
         end
 
@@ -320,21 +326,25 @@ module groovy_top (
     // region and the top rows read the wrong bank (top-of-screen glitch).
     logic display_bank = 1'b1, pending = 1'b0, vsync_q = 1'b0;
     logic [2:0] frt_s = 3'd0;
+    logic [1:0] br_s = 2'b00;                  // beam_race synced into pix_clk
     always_ff @(posedge pix_clk or negedge rst)
-        if (!rst) begin frt_s<=3'd0; display_bank<=1'b1; pending<=1'b0; swap_done_tgl<=1'b0; vsync_q<=1'b0; end
+        if (!rst) begin frt_s<=3'd0; display_bank<=1'b1; pending<=1'b0; swap_done_tgl<=1'b0; vsync_q<=1'b0; br_s<=2'b00; end
         else begin
             frt_s   <= {frt_s[1:0], frame_rdy_tgl};
+            br_s    <= {br_s[0], beam_race};
             vsync_q <= vsync;
             if (frt_s[2]^frt_s[1]) pending<=1'b1;                 // a written frame is ready
-            if (vsync & ~vsync_q & pending) begin                // swap at vsync start (vblank)
+            if (~br_s[1] && vsync & ~vsync_q & pending) begin     // double-buffer swap (vblank)
                 display_bank<=~display_bank; pending<=1'b0; swap_done_tgl<=~swap_done_tgl;
             end
         end
 
     // banks packed CONTIGUOUSLY (bank*NATIVE_PIX + addr) so both fit in DEPTH.
     localparam [13:0] BANK_OFF = 14'd7500;    // = NATIVE_PIX
-    wire [13:0] w_off = write_bank   ? BANK_OFF : 14'd0;
-    wire [13:0] r_off = display_bank ? BANK_OFF : 14'd0;
+    // beam-race uses bank 0 for both write and read (no swap); double-buffer uses
+    // opposite banks. (br_s[1] = beam_race in pix_clk; beam_race in clk50m.)
+    wire [13:0] w_off = (~beam_race  & write_bank)   ? BANK_OFF : 14'd0;
+    wire [13:0] r_off = (~br_s[1]    & display_bank) ? BANK_OFF : 14'd0;
     groovy_vram #(.DEPTH(2*NATIVE_PIX), .ADDR_W(FB_ADDR_W+1)) u_vram (
         .clk_w(clk50m), .we(fb_we & blit_writes), .waddr(w_off + {1'b0, fb_waddr}), .wdata(fb_wdata),
         .clk_r(pix_clk), .raddr(fb_raddr), .rdata(fb_rdata));
@@ -369,6 +379,24 @@ module groovy_top (
     // native raster line into clk50m for the ACK vCount (beam-race feedback).
     // /8 matches the x8 vertical scale (RECIP_V); generalize with the modeline later.
     always_ff @(posedge clk50m) vcount_50 <= vcount >> 3;
+
+    // beam-race write-progress + underrun (the display raster caught up to the
+    // network write -> it's reading not-yet-written lines = host fell behind).
+    wire [11:0] write_line;
+    groovy_writeline #(.LW(12)) u_wl (
+        .clk(clk50m), .rst(core_rst), .frame_start(blit_valid),
+        .wr_en(fb_we & blit_writes), .native_w(NATIVE_W[11:0]), .write_line(write_line));
+    logic [11:0] wl_s;  logic ur;
+    always_ff @(posedge pix_clk or negedge rst)
+        if (!rst) begin wl_s<=12'd0; ur<=1'b0; end
+        else begin
+            wl_s <= write_line;                                  // approx CDC (status only)
+            if (frame_start_w)                          ur <= 1'b0;
+            else if (de & br_s[1] & (vcount[14:3] >= wl_s)) ur <= 1'b1;  // read >= written line
+        end
+    logic [1:0] ur_s;
+    always_ff @(posedge clk50m) ur_s <= {ur_s[0], ur};
+    assign beamrace_status = {7'd0, ur_s[1]};            // bit0 = beam-race underrun
 
     DVI_TX_Top u_dvi (
         .I_rst_n(~video_rst), .I_serial_clk(serial_clk), .I_rgb_clk(pix_clk),

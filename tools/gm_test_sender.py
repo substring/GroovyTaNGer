@@ -120,7 +120,7 @@ def send_blitstream(sock, addr, args):
     ch = args.chunk & ~1
     for i in range(args.frames):
         t0 = time.time()
-        sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, i + 1, 0, 0), addr)
+        sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, i + 1, 0, args.vsync), addr)
         frame = gen_frame_anim(args.width, args.height, i)
         for off in range(0, len(frame), ch):
             sock.sendto(frame[off:off+ch], addr)
@@ -140,7 +140,7 @@ def send_blitimg(sock, addr, args):
     sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)
     try: print(decode_reply(sock.recvfrom(64)[0]))         # INIT ACK
     except socket.timeout: print("(no INIT ack)")
-    sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, 0, 0), addr)
+    sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, 0, args.vsync), addr)
     try: print(decode_reply(sock.recvfrom(64)[0]))         # BLIT ACK
     except socket.timeout: print("(no BLIT ack)")
     frame = gen_frame(args.width, args.height)
@@ -211,6 +211,7 @@ def main():
     bi.add_argument("--frame", type=int, default=1)
     bi.add_argument("--chunk", type=int, default=1440)
     bi.add_argument("--delay", type=float, default=0.002, help="seconds between datagrams")
+    bi.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     bs = sub.add_parser("blitstream")  # continuous animated frames (double-buffer test)
     bs.add_argument("--width", type=int, default=100)
     bs.add_argument("--height", type=int, default=75)
@@ -218,6 +219,7 @@ def main():
     bs.add_argument("--fps", type=float, default=30.0)
     bs.add_argument("--chunk", type=int, default=1440)
     bs.add_argument("--delay", type=float, default=0.001, help="seconds between datagrams")
+    bs.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     args = p.parse_args()
 
     if args.cmd in ("blitimg", "blitstream"):
