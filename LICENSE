@@ -4,15 +4,68 @@ from which it inherits code.
 
 The full text of the GNU General Public License version 2 is available at:
   https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+(version 3, used for the combined work — see "License compatibility" below — at:
+  https://www.gnu.org/licenses/gpl-3.0.txt)
 
-Vendored third-party code keeps its own license and attribution:
-  - Sipeed/ZiyangYE RMII UDP stack . rtl/vendor/sipeed_udp/ (Apache-2.0; see
-                                     its LICENSE + NOTICE.md and per-file headers)
-  - sameer/hdl-util/hdmi .......... see rtl/generic/video/hdmi/ (when vendored)
-  - nand2mario/tangcore (hdmi2) ... see vendored sources for notices
 
-Reference (not linked into the build): extern/Groovy_MiSTer (submodule, GPLv2)
-— protocol/RTL reference; see docs/protocol_verified.md.
+VENDORED THIRD-PARTY CODE
+=========================
+Each keeps its own license and attribution; do not strip per-file headers.
 
-A copy of the full GPLv2 text should be placed in this file before any public
-release. This stub records intent and the SPDX identifier for now.
+  - Sipeed / ZiyangYE RMII UDP stack ... rtl/vendor/sipeed_udp/
+      Apache-2.0. RMII MAC + ARP + IPv4 + UDP engine for the RTL8201 PHY.
+      Source: https://github.com/sipeed/TangPrimer-20K-example (Ethernet/verilog_UDP)
+      Upstream author: ZiyangYE (https://github.com/ZiyangYE/Verilog_TCP)
+      See its LICENSE + NOTICE.md.
+
+  - nand2mario DDR3 controller ........ rtl/vendor/nand2mario_ddr3/  (when vendored)
+      Apache-2.0. Low-latency DDR3-800 PHY/controller for GW2A / Tang Primer 20K.
+      Source: https://github.com/nand2mario/ddr3-tang-primer-20k
+      Upstream author: nand2mario.
+      See its LICENSE + NOTICE.md when added. Design notes: docs/ddr3.md.
+
+  - sameer / hdl-util HDMI ............. rtl/generic/video/hdmi/  (when vendored)
+      Forked via tangcore nestang hdmi2 (a Gowin adaptation).
+      Upstream: https://github.com/hdl-util/hdmi  (license per its repo; record on vendor).
+      See that dir's README; currently empty (not yet vendored).
+
+  - nand2mario tangcore (hdmi2) ....... (when vendored)
+      See vendored sources for notices.
+
+
+GOWIN PROPRIETARY IP
+====================
+Gowin device-IP files are copyright Gowin Semiconductor and are NOT covered by
+Groovy_Tang's GPL. They are either regenerated locally or vendored under Gowin's
+own (proprietary) license; redistribution terms are Gowin's, not ours.
+
+  - rtl/vendor/sipeed_udp/PLL_6M.v ...... Gowin rPLL IP (tracked; "IP file",
+      Copyright Gowin Semiconductor). Came with the Sipeed UDP example.
+  - rtl/board/.../video/dvi_tx/dvi_tx.v . Gowin DVI_TX IP. Proprietary/encrypted,
+      git-ignored, regenerate locally (Gowin IP wizard) — see that dir's README.
+
+Gowin device primitives instantiated directly (rPLL, OSER, ELVDS_OBUF, B-SRAM,
+DQS, etc.) are part of the toolchain/device and are not redistributed by us.
+
+
+LICENSE COMPATIBILITY
+=====================
+The Apache-2.0 vendored blocks (Sipeed UDP, nand2mario DDR3) are incompatible
+with GPLv2 but ARE compatible with GPLv3. Because Groovy_Tang is GPL-2.0-OR-LATER,
+the combined/linked work may be used under GPLv3, under which Apache-2.0 is
+compatible. Apache-2.0 NOTICE/attribution is preserved in each vendor directory.
+
+The Gowin proprietary IP above is not GPL and not redistributed under our license;
+it is used per Gowin's terms. Builds that include it are not redistributable as a
+single GPL work — ship our GPL sources and let users regenerate the Gowin IP.
+
+
+REFERENCE (not linked into the build)
+=====================================
+  - extern/Groovy_MiSTer ... submodule, GPLv2. Protocol/RTL reference only.
+      https://github.com/psakhis/Groovy_MiSTer  — see docs/protocol_verified.md.
+
+
+A copy of the full GPLv2 (and, for the combined work, GPLv3) text should be placed
+alongside this file before any public release. This file records the licensing
+intent, the SPDX identifier, and the third-party manifest.
