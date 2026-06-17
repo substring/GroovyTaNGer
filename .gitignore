@@ -5,8 +5,13 @@ sim/build/
 *.fst
 *.lxt2
 
-# Gowin EDA project artifacts
-impl/
+# Gowin EDA build OUTPUT (regenerated every build) - but NOT the whole impl/
+# dir: impl/<name>_process_config.json holds the per-project build settings
+# (SystemVerilog 2017 + DONE/READY/SSPI dual-purpose pins). Those MUST be tracked
+# or a fresh clone builds with wrong defaults and fails (SV parse + P&R pin errors).
+impl/pnr/
+impl/gwsynthesis/
+impl/temp/
 *.fs
 *.bit
 *.rpt.html
