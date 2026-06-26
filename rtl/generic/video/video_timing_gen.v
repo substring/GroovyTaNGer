@@ -36,8 +36,8 @@ module video_timing_gen (
     output wire        hsync,
     output wire        vsync,
     output wire        de,             // data enable (active video region)
-    output wire        line_start,     // pulse at first pixel of every line
-    output wire        frame_start     // pulse at first pixel of every frame
+    output reg         line_start,     // pulse at first pixel of every line
+    output reg         frame_start     // pulse at first pixel of every frame
 );
     wire last_h = (hcount == h_total - 16'd1);
     wire last_v = (vcount == v_total - 16'd1);
@@ -63,8 +63,24 @@ module video_timing_gen (
     assign vsync = v_sync_pos ? vsync_raw : ~vsync_raw;
     assign de    = (hcount < h_active) && (vcount < v_active);
 
-    assign line_start  = (hcount == 16'd0);
-    assign frame_start = (hcount == 16'd0) && (vcount == 16'd0);
+    // REGISTER line_start/frame_start in the pixel-clock domain. They were
+    // combinational decodes of the 16-bit hcount/vcount; consumers in another clock
+    // domain (the line-buffer reader's pclk fetch FSM) sampled them directly, and a
+    // combinational multi-bit decode GLITCHES as the counters roll over -> the foreign
+    // clock caught ~30 spurious frame_start edges per frame, resetting the fetch FSM
+    // mid-line so it never completed a single line (HW-confirmed: FE ~30/frame, FDONE
+    // never reached). A registered pulse is glitch-free and crosses clock domains safely.
+    always @(posedge clk) begin
+        if (rst) begin
+            line_start  <= 1'b0;
+            frame_start <= 1'b0;
+        end else if (en) begin
+            // value the counters will hold AFTER this edge (so the pulse is high
+            // exactly during the first active pixel, matching the old decode).
+            line_start  <= last_h;
+            frame_start <= last_h && last_v;
+        end
+    end
 endmodule
 
 `default_nettype wire
