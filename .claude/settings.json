@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "permissions": {
+    "allow": [
+      "Bash(tools/gw_build.sh *)",
+      "Bash(tools/gw_build.sh)",
+      "Bash(/home/subs/GOWIN_EDA_1.9.12.03/IDE/bin/gw_sh *)",
+      "Bash(env LD_PRELOAD=* /home/subs/GOWIN_EDA_1.9.12.03/IDE/bin/gw_sh *)",
+      "Bash(iverilog -g2012 *)",
+      "Bash(vvp *)",
+      "Bash(openFPGALoader -b tangprimer20k rtl/board/tang_primer_20k/ddr3burst/impl/pnr/ddr3burst.fs)",
+      "Bash(openFPGALoader -b tangprimer20k rtl/board/tang_primer_20k/ddr3video/impl/pnr/diag_noram.fs)",
+      "Bash(openFPGALoader -b tangprimer20k rtl/board/tang_primer_20k/ddr3video/impl/pnr/ddr3video.fs)",
+      "Bash(stty -F /dev/ttyUSB1 *)",
+      "Bash(cat /dev/ttyUSB1)",
+      "Bash(openFPGALoader -b tangprimer20k *)",
+      "Bash(timeout * head -c * /dev/ttyUSB1*)"
+    ]
+  }
+}

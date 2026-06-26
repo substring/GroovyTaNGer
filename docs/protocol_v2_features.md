@@ -76,7 +76,69 @@ clock; its 32-bit divisions don't meet 50 MHz timing). Tool:
 the real rPLL reconfig + video pipeline (Rung 4b+) make the result observable as
 an actual clock/picture.
 
+## CMD_BLIT line/frame HASH — proposed v2 integrity extension
+
+**Status: PROPOSAL (not yet implemented). Motivation: see `docs/ddr3.md` byte-lane
+skew + memory `ddr3-byte-lane-skew`.**
+
+### Why
+Two independent integrity gaps the current v1 protocol does not cover:
+1. **Network**: v1 integrity is *length-only* — the receiver aborts a blit if the
+   running byte total ≠ expected (`protocol_verified.md` "frame abort"), but a
+   corrupted-but-right-length datagram passes silently.
+2. **DDR3 round-trip (our actual bug)**: the framebuffer write→DDR3→read path can
+   corrupt pixels (HW-confirmed byte-lane read skew). Nothing today *detects* that a
+   stored line reads back wrong; we found it only by hand-decoding UART hex.
+
+A per-line hash sent by the emulator lets the FPGA **self-verify**: store the hash in
+BRAM when the line arrives, write the pixels to DDR3, then on scanout (or a verify
+pass) recompute the hash from what DDR3 actually returned and compare. Mismatch =>
+bump an internal counter. This turns "is the rain fixed?" into a single number, and
+catches network corruption for free.
+
+### Algorithm
+**CRC-32** (IEEE 802.3 poly 0x04C11DB7) over each line's pixel bytes, in transmission
+order, before any DDR3 store. Chosen because:
+- On an FPGA a CRC-32 over a 16-bit (or wider) word is **fully combinational, 1 clock,
+  zero added latency**, a few dozen LUTs — it runs *in parallel* with the existing
+  write/read datapath, so the cycle cost is effectively zero (the real question the
+  user raised: HW "CPU overhead" is a non-issue).
+- Standard, well-distributed, and the emulator already links zlib/LZ4 (CRC available).
+- NOTE: CRC **detects**, it does not **correct**. Our DDR3 error is *deterministic*
+  (same wrong byte every read), so detect-and-retry can't recover a bad pixel — the
+  hash is a *diagnostic / fix-verification* tool and a *network* integrity check, not
+  a runtime repair. Repairing a whole stale byte would need heavy ECC (Reed-Solomon
+  class), which costs more than fixing the PHY; out of scope.
+
+### Wire format — two options (pick at INIT via a feature bit)
+- **Per-line, inline**: the emulator appends a 4-byte CRC-32 after each line's pixels
+  in the BLIT stream. Receiver strips/checks it per line. Best for localizing which
+  line is bad (DDR3 debug) and bounded BRAM (one CRC in flight).
+- **Per-frame, trailing**: one CRC-32 over the whole frame, sent in the BLIT tail
+  (extends the `cSize`/flag tail of variants 8/9/12/13). Cheaper bandwidth, coarser.
+
+Advertise support via a new **`integrity` bitfield** byte in the `CMD_GET_FEATURES`
+reply (reserved bytes 9..11 today): `b0 CRC32_LINE  b1 CRC32_FRAME`. The PC enables
+it in CMD_INIT only if the board advertises it — strict v1 clients never send hashes,
+so this stays backward-compatible.
+
+### FPGA side
+- `rtl/core/groovy_crc32.v` (new): streaming CRC-32, parallel per data word.
+- Line-hash BRAM: store the received CRC per line (depth = max lines, e.g. 320).
+- Verify: a second CRC-32 instance on the DDR3 *read* stream; compare to the stored
+  value at end-of-line; counters `crc_lines_checked`, `crc_lines_bad`, `crc_first_bad`.
+- Expose the counters over the existing UART debug (pin M11, see memory
+  `tang-debug-uart`) and/or in the CMD_GET_STATUS ACK spare bits — so a fix attempt is
+  a one-glance pass/fail instead of pixel hunting.
+
+### Testing
+- Sim: feed a known line + its CRC, corrupt one byte in the modelled DDR3, assert the
+  bad-counter increments and `crc_first_bad` = that line.
+- HW: run the soak with CRC verify; report `bad/checked` over UART. Any future DDR3
+  deskew fix is confirmed iff `crc_lines_bad == 0`.
+
 ## Future
 This is the negotiation hook for V2+: new compression bits (RLE/QOI), new RGB
-modes, or capability flags (interlaced, audio, max resolution) can be added as
-reserved bytes/bits without a new command or breaking older clients.
+modes, integrity hashes (above), or capability flags (interlaced, audio, max
+resolution) can be added as reserved bytes/bits without a new command or breaking
+older clients.
