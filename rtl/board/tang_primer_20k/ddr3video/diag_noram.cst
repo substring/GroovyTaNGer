@@ -1,0 +1,19 @@
+// Groovy_Tang - DIAGNOSTIC (no DDR3) constraints: clock/reset/LEDs + TMDS only.
+// NO DDR3 pins - this build deliberately excludes the real memory to isolate the
+// line-buffer reader + scaler + DVI path. Same clock/LED/TMDS pins as ddr3video.
+
+IO_LOC  "sys_clk" H11;    IO_PORT "sys_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "sys_resetn" T10; IO_PORT "sys_resetn" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC  "led[0]" C13;  IO_PORT "led[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "led[1]" A13;  IO_PORT "led[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "led[2]" L16;  IO_PORT "led[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "led[3]" N14;  IO_PORT "led[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "led[4]" L14;  IO_PORT "led[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "led[5]" N16;  IO_PORT "led[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "uart_txp" M11;  IO_PORT "uart_txp" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC  "O_tmds_clk_p" G16,H15;       IO_PORT "O_tmds_clk_p" PULL_MODE=NONE DRIVE=3.5;
+IO_LOC  "O_tmds_data_p[0]" H14,H16;   IO_PORT "O_tmds_data_p[0]" PULL_MODE=NONE DRIVE=3.5;
+IO_LOC  "O_tmds_data_p[1]" J15,K16;   IO_PORT "O_tmds_data_p[1]" PULL_MODE=NONE DRIVE=3.5;
+IO_LOC  "O_tmds_data_p[2]" K14,K15;   IO_PORT "O_tmds_data_p[2]" PULL_MODE=NONE DRIVE=3.5;

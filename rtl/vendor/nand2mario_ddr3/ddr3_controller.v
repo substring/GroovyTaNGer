@@ -18,8 +18,13 @@
 // - Equivalent to "sg25" in Micron DDR3 model
 //
 
-// Undefine this to use DDR3-1066
-`define DDR3_800
+// Undefine this to use DDR3-1066.
+// Groovy_Tang: DDR3_800 was UNRELIABLE on this SK Hynix part (one byte lane marginal,
+// ~50% read errors). Per the upstream issues (#1/#3, same part), the DDR3-1066 config
+// keeping the PLL at 800 MHz fixes it: dout = dq_in[4] (a later, more-settled burst
+// sample) + larger CAS/CWL/RCD margin. The PLL/clocks are NOT changed (pclk/fclk are
+// top-level inputs). See [[ddr3-byte-lane-skew]] UPDATE 5.
+//`define DDR3_800
 
 module ddr3_controller
 #(
@@ -225,6 +230,67 @@ reg [1:0] rburst_seen;
 reg rcalib_done = 1'b0;
 reg [3:0] rcalib_cnt = 4'b0;
 assign read_calib_done = rcalib_done;
+
+// CENTER-OF-EYE read calibration (Groovy_Tang): instead of committing the FIRST
+// rclkpos/rclksel where both byte lanes show rburst (which lands on the EDGE of the
+// passing window -> marginal, drifts out across power cycles, and one lane is
+// off-center -> byte-lane corruption), sweep ALL 32 positions, record the WIDEST
+// contiguous run where BOTH lanes pass, and commit that run's MIDPOINT. Positions are
+// linear: pos = rclkpos*8 + rclksel (0..31). The (rclkpos,rclksel) actually applied
+// during the sweep is derived combinationally from cal_pos below.
+reg [5:0] cal_pos    = 6'd0;   // current sweep position 0..31 (32 = done)
+reg [5:0] run_start  = 6'd0;   // start pos of the current contiguous passing run
+reg       in_run     = 1'b0;   // currently inside a passing run
+reg [5:0] best_start = 6'd0;   // start pos of the best (widest) run found
+reg [5:0] best_len   = 6'd0;   // length of the best run (0 = none found yet)
+reg       committing = 1'b0;   // post-sweep: issuing the settling read at the committed phase
+wire [5:0] best_mid  = best_start + (best_len >> 1);   // midpoint position to commit
+
+// PER-LANE RCLKSEL (Groovy_Tang): the two DQS byte lanes are SEPARATE Gowin DQS IP
+// instances and want DIFFERENT read phases; sharing ONE global rclksel leaves one lane
+// off-centre -> ~32% byte-lane corruption (HW). Prior probe work proved per-lane rclksel
+// takes this 100%->~0.03%. rclkpos (read-pulse cycle) stays SHARED (committed from the
+// both-lanes center-of-eye run for boot reliability); only rclksel is per-lane. We track
+// EACH lane's own widest contiguous passing run (using its OWN rburst[i]) across the same
+// 32-pos sweep, and commit each lane's MIDPOINT rclksel. Wired into the DQS instances as
+// rclksel_lane[i]. See [[ddr3-byte-lane-skew]] UPDATE 6/8.
+// BUGFIX (per-lane center-of-eye over the full 32-pos space gave 61%, WORSE than the 32%
+// global, because a lane's run crossed rclkpos boundaries -> wrong rclksel for the shared
+// rclkpos). NEW robust approach: collect, per lane, an 8-bit PASS MASK of which rclksel
+// (0..7) passed AT THE COMMITTED rclkpos block, then pick the CENTRE of that lane's widest
+// run of passing rclksel. To do this in one sweep we record a pass-mask per lane per
+// rclkpos block (4 blocks x 8 bits) is wasteful; instead, since rclkpos is committed from
+// the both-lanes center-of-eye = best_mid[4:3], we keep a running 8-bit mask per lane for
+// the CURRENT block and SNAPSHOT it into pass0/pass1 when this block == the (so-far) best
+// both-lanes rclkpos. Simpler & correct: keep pass0/1 masks for EVERY block we enter and,
+// at commit, index the block that matches best_mid[4:3]. We store all 4 blocks: 4x8=32b.
+reg [7:0] pass0 [0:3];   // lane0 rclksel pass-mask per rclkpos block
+reg [7:0] pass1 [0:3];   // lane1 rclksel pass-mask per rclkpos block
+wire [1:0] cur_rclkpos = cal_pos[5:3];                   // rclkpos of the current sweep pos
+wire [2:0] cur_rclksel = cal_pos[2:0];                   // rclksel of the current sweep pos
+reg [2:0] rclksel_l0 = 3'd0, rclksel_l1 = 3'd0;   // committed per-lane rclksel
+// during the sweep both DQS use the swept rclksel; after commit (rcalib_done) each uses
+// its own committed value.
+// PER_LANE_EN: per-lane rclksel made HW WORSE (61-64% vs 32% global) on this build twice
+// (center-of-eye AND pass-mask). rburst-based per-lane centering optimises the wrong thing
+// (the read-data eye centre != where rburst is widest; cf [[ddr3-byte-lane-skew]] UPDATE 2
+// "eye-centering does not fix it"). Set PER_LANE_EN=0 to use the GLOBAL center-of-eye
+// rclksel for both lanes (the 32% baseline). Keep the per-lane machinery for future tries.
+localparam PER_LANE_EN = 1'b0;
+wire [2:0] rclksel_lane0 = (PER_LANE_EN && rcalib_done) ? rclksel_l0 : rclksel;
+wire [2:0] rclksel_lane1 = (PER_LANE_EN && rcalib_done) ? rclksel_l1 : rclksel;
+// center-of-widest-run of an 8-bit mask -> the rclksel to commit. Pure function.
+function [2:0] center_of_mask; input [7:0] m;
+    integer i; integer rs, bl, bs, cl;
+    begin
+        rs=0; bl=0; bs=0; cl=0;
+        for (i=0;i<8;i=i+1) begin
+            if (m[i]) begin cl=cl+1; if (cl>bl) begin bl=cl; bs=rs; end end
+            else begin cl=0; rs=i+1; end
+        end
+        center_of_mask = (bl==0) ? 3'd0 : (bs + (bl>>1));   // 0 = no pass (fallback)
+    end
+endfunction
 
 `ifdef SIM
 localparam WLEVEL_COUNT=2;
@@ -521,46 +587,96 @@ always @(posedge pclk) begin
         // Issues BL8 read commands while adjusting rclkpos (0-3), rclksel (0-7)
         // until we see rburst pulse after the read. Then read calibration is achieved.
         {READ_CALIB, FIVEB'(0)}: begin
-            $display("Entering READ CALIBRATION");
+            $display("Entering READ CALIBRATION (center-of-eye sweep)");
             // activate bank 0
             {nRAS[0], nCAS[0], nWE[0]} <= CMD_BankActivate;
             BA[0] <= 0; A[0] <= 0;
-            rcalib_cnt <= 0;
-`ifdef SIM
-            // in simulation the final rclkpos=2, rclksel=0 for DDR3-800
-            //                         rclkpos=1, rclksel=1 for DDR3-1066
-    `ifdef DDR3_800
-            rclkpos <= 2'd1; rclksel <= 3'd6;
-    `else
-            rclkpos <= 2'd1; rclksel <= 3'd0;
-    `endif
-`endif
+            // start the sweep at position 0 (rclkpos=0, rclksel=0).
+            cal_pos    <= 6'd0;
+            rclkpos    <= 2'd0;
+            rclksel    <= 3'd0;
+            in_run     <= 1'b0;
+            run_start  <= 6'd0;
+            best_start <= 6'd0;
+            best_len   <= 6'd0;
+            committing <= 1'b0;
+            pass0[0]<=8'd0; pass0[1]<=8'd0; pass0[2]<=8'd0; pass0[3]<=8'd0;
+            pass1[0]<=8'd0; pass1[1]<=8'd0; pass1[2]<=8'd0; pass1[3]<=8'd0;
         end
         {READ_CALIB, FIVEB'(RCD/4)}: begin
-            // issue read
-            $display("rclkpos=%d, rclksel=%d", rclkpos, rclksel);
+            // issue read at the CURRENT sweep position (rclkpos/rclksel already set)
+            $display("calib pos=%d rclkpos=%d rclksel=%d", cal_pos, rclkpos, rclksel);
             {nRAS[2], nCAS[2], nWE[2]} <= CMD_Read;
             A[2][12] <= 1'b1;                   // BL8 burst length
             A[2][10] <= 1'b0;                   // NO auto precharge
             A[2][9:0] <= 0;                     // row address=0
         end
-        {READ_CALIB, FIVEB'(RCD/4+10)}: begin   // Allow 10 cycles for rburst signal
-            if (rburst_seen != 2'b11) begin
-                rclksel <= rclksel + 3'b1;
-                rclkpos <= rclksel == 3'd7 ? rclkpos + 2'b1 : rclkpos;
-                rcalib_cnt <= 0;
-                cycle <= FIVEB'(RCD/4);         // loop
+        {READ_CALIB, FIVEB'(RCD/4+10)}: begin   // rburst_seen now valid for this position
+            // --- record this position's pass/fail into the run tracker ---
+            // pass = BOTH byte lanes returned a burst at this phase. Track the current
+            // contiguous run [this_start .. cal_pos] and keep the widest seen so far.
+            if (rburst_seen == 2'b11) begin
+                if (!in_run) begin
+                    in_run    <= 1'b1;
+                    run_start <= cal_pos;                  // run begins at cal_pos
+                    if (6'd1 > best_len) begin             // a length-1 run
+                        best_start <= cal_pos; best_len <= 6'd1;
+                    end
+                end else begin
+                    // run continues from run_start (set when it began)
+                    if ((cal_pos - run_start + 6'd1) > best_len) begin
+                        best_start <= run_start;
+                        best_len   <= cal_pos - run_start + 6'd1;
+                    end
+                end
             end else begin
-                rcalib_cnt <= rcalib_cnt + 1'b1;
-                // test RCALIB_COUNT times before we commit
-                if (rcalib_cnt == NIB'(RCALIB_COUNT - 1)) begin
-                    // read calibration is achieved
-                    rcalib_done <= 1'b1;
-                    {nRAS[0], nCAS[0], nWE[0]} <= CMD_PreCharge;    // precharge
-                    BA[0] <= 0; A[0] <= 0;                          // bank 0, row 0
-                    // exit read calib
-                end else 
-                    cycle <= FIVEB'(RCD/4);     // loop
+                in_run <= 1'b0;                            // run ends (or none)
+            end
+
+            // --- PER-LANE pass-mask recording: mark this (rclkpos,rclksel) pass per lane ---
+            if (rburst_seen[0]) pass0[cur_rclkpos][cur_rclksel] <= 1'b1;
+            if (rburst_seen[1]) pass1[cur_rclkpos][cur_rclksel] <= 1'b1;
+
+            // --- advance the sweep, commit, or finish ---
+            // ORDER MATTERS: check `committing` FIRST (the settling read just finished),
+            // then end-of-sweep, then normal advance.
+            if (committing) begin
+                // The settling read at the committed phase just finished -> precharge.
+                // This final read at the committed rclkpos/rclksel initialises the DQS
+                // read FIFO/RPOINT for that phase (the original first-edge code always
+                // had reads at the final phase before precharge; skipping it left the
+                // FIFO uninitialised -> the first real read didn't complete -> fetch
+                // stalled, HW-confirmed NL=0).
+                committing  <= 1'b0;
+                rcalib_done <= 1'b1;
+                {nRAS[0], nCAS[0], nWE[0]} <= CMD_PreCharge;
+                BA[0] <= 0; A[0] <= 0;
+                // fall through (cycle auto-increments) to the precharge-finish state
+            end else if (cal_pos == 6'd31) begin
+                // Sweep complete. Apply the MIDPOINT of the widest passing run and issue
+                // ONE settling read at it (re-enter read->settle), THEN precharge above.
+                // rclkpos: shared, from the BOTH-lanes run (boot reliability). rclksel:
+                // the sweep settling read uses the shared mid; the COMMITTED per-lane
+                // rclksel_l0/l1 (each lane's own centre) take over once rcalib_done.
+                rclkpos    <= best_mid[4:3];
+                rclksel    <= best_mid[2:0];
+                // per-lane rclksel = centre of each lane's widest passing run WITHIN the
+                // committed rclkpos block. If a lane has no pass there, center_of_mask
+                // returns 0; fall back to the shared rclksel for safety.
+                rclksel_l0 <= (pass0[best_mid[4:3]]==8'd0) ? best_mid[2:0]
+                                                           : center_of_mask(pass0[best_mid[4:3]]);
+                rclksel_l1 <= (pass1[best_mid[4:3]]==8'd0) ? best_mid[2:0]
+                                                           : center_of_mask(pass1[best_mid[4:3]]);
+                committing <= 1'b1;
+                cycle      <= FIVEB'(RCD/4);               // issue the settling read
+                $display("calib DONE: mid=%d rclkpos=%d ; pass0[%d]=%b pass1=%b",
+                         best_mid, best_mid[4:3], best_mid[4:3], pass0[best_mid[4:3]], pass1[best_mid[4:3]]);
+            end else begin
+                // next sweep position
+                cal_pos <= cal_pos + 6'd1;
+                rclkpos <= (cal_pos + 6'd1) >> 3;          // pos[5:3]
+                rclksel <= (cal_pos + 6'd1) & 6'd7;        // pos[2:0]
+                cycle   <= FIVEB'(RCD/4);                  // re-issue read at new phase
             end
         end
         {READ_CALIB, FIVEB'(RCD/4+10+RP/4)}: begin
@@ -587,6 +703,10 @@ always @(posedge pclk) begin
         cycle <= 0;
         wlevel_cnt <= 0; wlevel_done <= 2'b0; wstep <= 0;
         rcalib_cnt <= 0; rcalib_done <= 0; rclkpos <= 0; rclksel <= 0;
+        cal_pos <= 0; in_run <= 0; run_start <= 0; best_start <= 0; best_len <= 0; committing <= 0;
+        rclksel_l0 <= 0; rclksel_l1 <= 0;
+        pass0[0]<=8'd0; pass0[1]<=8'd0; pass0[2]<=8'd0; pass0[3]<=8'd0;
+        pass1[0]<=8'd0; pass1[1]<=8'd0; pass1[2]<=8'd0; pass1[3]<=8'd0;
         resetn_delay <= 1'b0;       // cause extra 200us reset for DDR3
         state <= RST_WAIT;
   end
@@ -654,7 +774,8 @@ generate
             .FCLK(fclk), .PCLK(pclk), .DQSIN(DDR3_DQS[i0]), .RESET(~rst_lock_n), .HOLD(dqs_hold), 
             .RLOADN(1'b0), .WLOADN(1'b0), .RMOVE(1'b0), .WMOVE(1'b0),
             .DLLSTEP(dllstep), .WSTEP(wstep),        // 0.625/0.025
-            .RCLKSEL(rclksel), .READ(dqs_read),
+            // PER-LANE RCLKSEL: each byte lane gets its own committed read phase.
+            .RCLKSEL(i0 == 0 ? rclksel_lane0 : rclksel_lane1), .READ(dqs_read),
             .DQSR90(clk_dqsr[i0]), .WPOINT(dqs_waddr[i0]), .RPOINT(dqs_raddr[i0]), 
             .DQSW0(clk_dqsw[i0]), .DQSW270(clk_dqsw270[i0]), .RBURST(rburst[i0])
         );

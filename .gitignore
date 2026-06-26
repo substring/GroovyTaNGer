@@ -12,12 +12,27 @@ sim/build/
 impl/pnr/
 impl/gwsynthesis/
 impl/temp/
+**/impl/pnr/
+**/impl/gwsynthesis/
+**/impl/temp/
 *.fs
 *.bit
 *.rpt.html
 *.rpt.txt
 gwsynthesis/
 *.bak
+# Gowin P&R/synth byproducts that escape the dir patterns above (belt-and-braces)
+*.binx
+*.db
+*.timing_paths
+cmd.do
+device.cfg
+rtl_parser*.json
+rtl_parser.result
+# stray top-level Gowin project output dir (the GUI sometimes writes here)
+/Groovy_TaNGer/impl/
+# stray iverilog default output
+a.out
 *.gprj.user
 
 # Claude Code local (per-user) settings
@@ -36,3 +51,7 @@ __pycache__/
 rtl/board/tang_primer_20k/video/dvi_tx/dvi_tx.v
 rtl/board/tang_primer_20k/video/dvi_tx/dvi_tx.vo
 rtl/board/tang_primer_20k/video/dvi_tx/*.ipc
+# Gowin DDR3 Memory Interface IP (encrypted, regenerate via IP wizard; see ddr3_ip/README)
+rtl/board/tang_primer_20k/gwddr3video/ddr3_ip/ddr3_mi.v
+rtl/board/tang_primer_20k/gwddr3video/ddr3_ip/ddr3_mi.vo
+rtl/board/tang_primer_20k/gwddr3video/ddr3_ip/temp/

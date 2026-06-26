@@ -1,0 +1,19 @@
+<?xml version="1" encoding="UTF-8"?>
+<!DOCTYPE gowin-fpga-project>
+<Project>
+    <Template>FPGA</Template>
+    <Version>5</Version>
+    <Device name="GW2A-18C" pn="GW2A-LV18PG256C8/I7">gw2a18c-011</Device>
+    <FileList>
+        <File path="../../../vendor/nand2mario_ddr3/gowin_rpll.v" type="file.verilog" enable="1"/>
+        <File path="../../../vendor/nand2mario_ddr3/uart_tx_V2.v" type="file.verilog" enable="1"/>
+        <File path="../../../vendor/gowin/rpll_tmds.v" type="file.verilog" enable="1"/>
+        <File path="../../../generic/video/video_timing_gen.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_fake_ddr3.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_linebuf_reader.v" type="file.verilog" enable="1"/>
+        <File path="../video/dvi_tx/dvi_tx.v" type="file.verilog" enable="1"/>
+        <File path="diag_noram_top.v" type="file.verilog" enable="1"/>
+        <File path="diag_noram.cst" type="file.cst" enable="1"/>
+        <File path="diag_noram.sdc" type="file.sdc" enable="1"/>
+    </FileList>
+</Project>
