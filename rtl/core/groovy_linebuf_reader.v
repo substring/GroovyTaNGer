@@ -46,7 +46,12 @@ module groovy_linebuf_reader #(
     input  wire [15:0]       vcount,
     input  wire              de,           // data enable (active region)
     input  wire              line_start,   // pulse: first pixel of each line
-    input  wire              frame_start,  // pulse: first pixel of each frame
+    input  wire              frame_start,  // pulse: first pixel of each frame (scanout)
+    // pulse at the START OF VERTICAL BLANKING (well before active line 0). The FETCH
+    // resets/restarts on THIS, not frame_start, so it pre-fills lines 0..LEAD during
+    // vblank and buffer 0 is ready when active video begins -> no top-of-frame
+    // cold-start artifact. Tie to frame_start if a board has no separate signal.
+    input  wire              fetch_fs,
     output reg  [15:0]       pix_rgb565,   // current pixel (valid when de)
 
     // ---- DDR3 (fetch) domain ----
@@ -140,7 +145,7 @@ module groovy_linebuf_reader #(
     // resetting the fetch mid-line. Rising-only = exactly one reset per frame.
     // (frame_start itself is REGISTERED in video_timing_gen so it doesn't glitch.)
     reg [3:0] fs_s = 4'd0;
-    always @(posedge pclk) fs_s <= {fs_s[2:0], frame_start};
+    always @(posedge pclk) fs_s <= {fs_s[2:0], fetch_fs};   // fetch restarts at vblank start
     wire fs_edge = (fs_s[3] == 1'b0) && (fs_s[2] == 1'b1);
     // h_active / v_active crossed to pclk (stable; change only on mode switch)
     reg [15:0] hact_s = 16'd0, vact_s = 16'd0;
@@ -213,10 +218,13 @@ module groovy_linebuf_reader #(
     // Credit-based pacing: keep the fetch >=1 and <=LEAD source lines ahead of the
     // beam (3 buffers, LEAD=2 -> the displayed buffer is never overwritten).
     localparam [15:0] LEAD = 16'd2;
+    // consumed_pix resets at fetch_fs (vblank start), matching the fetch's next_line
+    // reset, so during vblank the credit pacing fills exactly lines 0..LEAD (not the
+    // whole frame off the stale previous-frame count) and holds them for active video.
     reg [15:0] consumed_pix = 16'd0;
     always @(posedge pix_clk) begin
-        if (pix_rst || frame_start) consumed_pix <= 16'd0;
-        else if (src_de_fell)       consumed_pix <= consumed_pix + 16'd1;
+        if (pix_rst || fetch_fs) consumed_pix <= 16'd0;
+        else if (src_de_fell)    consumed_pix <= consumed_pix + 16'd1;
     end
     reg [15:0] consumed_s = 16'd0;
     always @(posedge pclk) consumed_s <= consumed_pix;   // CDC (slow-moving)

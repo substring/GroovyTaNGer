@@ -242,6 +242,16 @@ module gwddr3video_top (
         .hsync(hsync), .vsync(vsync), .de(de),
         .line_start(line_start), .frame_start(frame_start));
 
+    // fetch_fs: a 1-cycle pulse at the START OF VERTICAL BLANKING (first cycle vcount
+    // enters the blank region, vcount==OUT_H && hcount==0). The line-buffer fetch
+    // restarts on this (not frame_start), so it pre-fills the first source lines during
+    // the ~30-line vblank -> buffer 0 is ready when active line 0 is displayed -> the
+    // top-of-frame cold-start artifact is gone (HW-confirmed clean). frame_start still
+    // drives the scanout (disp_line).
+    reg fetch_fs;
+    always @(posedge pix_clk)
+        fetch_fs <= (vcount == OUT_H) && (hcount == 16'd0);
+
     // delay de/hs/vs to match the line-buffer reader's pixel pipeline (2 pix_clk)
     reg [1:0] de_p, hs_p, vs_p;
     always @(posedge pix_clk) begin
@@ -270,6 +280,7 @@ module gwddr3video_top (
         .h_active(SRC_W), .v_active(SRC_H),
         .hcount(hcount), .vcount(vcount), .de(de),
         .line_start(line_start), .frame_start(frame_start),
+        .fetch_fs(fetch_fs),
         .pix_rgb565(pix565),
         // HOLD the reader's fetch FSM in reset until the boot writer has filled
         // the framebuffer (fill_done). Before that the arbiter gives DDR3 to the
