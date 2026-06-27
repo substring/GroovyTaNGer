@@ -14,6 +14,11 @@
 #       --hactive 640 --hbegin 656 --hend 752 --htotal 800 \
 #       --vactive 480 --vbegin 490 --vend 492 --vtotal 525 --interlace 0
 #   gm_test_sender.py --host 192.168.1.59 blit --frame 1 --field 0 --vsync 0
+#   gm_test_sender.py --host 192.168.1.59 blitimg --width 320 --height 240
+#   gm_test_sender.py --host 192.168.1.59 blitfile photo.png   # native size + switchres modeline
+#       (loads at NATIVE resolution, runs switchres for the 15kHz CRT modeline,
+#        sends CMD_SWITCHRES + the native pixels; --refresh/--monitor/--dotclock-min)
+#   gm_test_sender.py --host 192.168.1.59 blitstream --width 320 --height 240 --fps 30
 import argparse, socket, struct, sys, time
 
 DATA_PORT = 32100
