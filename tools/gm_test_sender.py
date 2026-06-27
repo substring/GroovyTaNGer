@@ -153,6 +153,82 @@ def send_blitimg(sock, addr, args):
           f"in {n} datagrams (delay={args.delay}s) -> {addr[0]}:{addr[1]}")
 
 
+def calc_modeline(w, h, refresh, monitor="arcade_15", dotclock_min=25.0):
+    """Invoke the switchres CLI to compute a CRT modeline for a NATIVE w x h @ refresh.
+
+    Returns a dict {pclk_mhz, hact,hbeg,hend,htot, vact,vbeg,vend,vtot, interlace,
+    name}. dotclock_min forces switchres to apply HORIZONTAL super-resolution until
+    the pixel clock clears the HDMI ~25 MHz floor - WITHOUT touching the line count
+    (so the vertical scan stays native = a true 15 kHz / native-Hz CRT signal). The
+    modeline's hActive is therefore the super-res'd OUTPUT width (e.g. 1280); the
+    pixels we send stay at the image's NATIVE width (e.g. 320) and the FPGA replicates
+    horizontally. Mirrors how GroovyMAME's bundled switchres feeds CMD_SWITCHRES.
+    """
+    import subprocess, re
+    cmd = ["switchres", str(w), str(h), f"{refresh:g}", "-c",
+           "-m", monitor, "--dotclock_min", f"{dotclock_min:g}"]
+    out = subprocess.run(cmd, capture_output=True, text=True).stdout
+    m = re.search(r'Modeline\s+"([^"]+)"\s+([\d.]+)\s+'
+                  r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+'
+                  r'(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+'
+                  r'([-+]\w+)\s+([-+]\w+)(\s+interlace)?', out)
+    if not m:
+        raise SystemExit(f"switchres gave no modeline for {w}x{h}@{refresh}:\n{out}")
+    g = m.groups()
+    return dict(name=g[0], pclk_mhz=float(g[1]),
+                hact=int(g[2]), hbeg=int(g[3]), hend=int(g[4]), htot=int(g[5]),
+                vact=int(g[6]), vbeg=int(g[7]), vend=int(g[8]), vtot=int(g[9]),
+                interlace=1 if g[12] else 0)
+
+
+def load_image_rgb565(path):
+    """Load PNG/BMP/etc. at its NATIVE size (no resize) -> (w, h, rgb565 bytes LE)."""
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    px = im.load()
+    buf = bytearray()
+    for y in range(h):
+        for x in range(w):
+            r, g, b = px[x, y]
+            buf += struct.pack("<H", ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
+    return w, h, bytes(buf)
+
+
+def send_blitfile(sock, addr, args):
+    # NATIVE-resolution image -> switchres modeline -> CMD_SWITCHRES -> INIT -> BLIT.
+    # No resize: the image's own w x h define the source; switchres derives the CRT
+    # modeline (horizontal super-res for the HDMI clock floor, native line count).
+    w, h, frame = load_image_rgb565(args.file)
+    ml = calc_modeline(w, h, args.refresh, args.monitor, args.dotclock_min)
+    print(f"image {w}x{h}  ->  modeline '{ml['name']}'  pclk={ml['pclk_mhz']:.3f}MHz "
+          f"h[{ml['hact']} {ml['hbeg']} {ml['hend']} {ml['htot']}] "
+          f"v[{ml['vact']} {ml['vbeg']} {ml['vend']} {ml['vtot']}] il={ml['interlace']}"
+          f"  (H super-res x{ml['hact']//w if w else 1})")
+
+    # CMD_SWITCHRES: pclk is a double in MHz; timings are the modeline's (output) values.
+    sock.sendto(struct.pack("<BdHHHHHHHHB", CMD_SWITCHRES, ml['pclk_mhz'],
+                            ml['hact'], ml['hbeg'], ml['hend'], ml['htot'],
+                            ml['vact'], ml['vbeg'], ml['vend'], ml['vtot'],
+                            ml['interlace']), addr)
+    time.sleep(0.1)                                        # let the PLL retune/settle
+
+    sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)   # rgb565
+    try: print(decode_reply(sock.recvfrom(64)[0]))
+    except socket.timeout: print("(no INIT ack)")
+    sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, 0, args.vsync), addr)
+    try: print(decode_reply(sock.recvfrom(64)[0]))
+    except socket.timeout: print("(no BLIT ack)")
+
+    ch = args.chunk & ~1                                   # keep pixels (2B) aligned
+    n = 0
+    for off in range(0, len(frame), ch):
+        sock.sendto(frame[off:off+ch], addr); n += 1
+        if args.delay > 0: time.sleep(args.delay)
+    print(f"blitfile: {args.file} {w}x{h} = {len(frame)} bytes (RGB565) "
+          f"in {n} datagrams (delay={args.delay}s) -> {addr[0]}:{addr[1]}")
+
+
 def build(args) -> bytes:
     c = args.cmd
     if c == "close":
@@ -212,6 +288,17 @@ def main():
     bi.add_argument("--chunk", type=int, default=1440)
     bi.add_argument("--delay", type=float, default=0.002, help="seconds between datagrams")
     bi.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
+    bf = sub.add_parser("blitfile")   # NATIVE-res image -> switchres modeline -> blit
+    bf.add_argument("file", help="PNG/BMP/etc. - sent at its NATIVE size (no resize)")
+    bf.add_argument("--refresh", type=float, default=60.0, help="target refresh Hz")
+    bf.add_argument("--monitor", default="arcade_15",
+                    help="switchres monitor preset (arcade_15, generic_15, pal, ntsc, vga...)")
+    bf.add_argument("--dotclock-min", dest="dotclock_min", type=float, default=25.0,
+                    help="min pixel clock MHz (H super-res to clear the HDMI floor)")
+    bf.add_argument("--frame", type=int, default=1)
+    bf.add_argument("--chunk", type=int, default=1440)
+    bf.add_argument("--delay", type=float, default=0.01, help="seconds between datagrams")
+    bf.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     bs = sub.add_parser("blitstream")  # continuous animated frames (double-buffer test)
     bs.add_argument("--width", type=int, default=100)
     bs.add_argument("--height", type=int, default=75)
@@ -222,10 +309,12 @@ def main():
     bs.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     args = p.parse_args()
 
-    if args.cmd in ("blitimg", "blitstream"):
+    if args.cmd in ("blitimg", "blitstream", "blitfile"):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(args.timeout)
-        (send_blitimg if args.cmd == "blitimg" else send_blitstream)(sock, (args.host, args.port), args)
+        dispatch = {"blitimg": send_blitimg, "blitstream": send_blitstream,
+                    "blitfile": send_blitfile}
+        dispatch[args.cmd](sock, (args.host, args.port), args)
         return
 
     pkt = build(args)
