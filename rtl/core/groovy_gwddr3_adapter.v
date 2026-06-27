@@ -20,9 +20,11 @@ module groovy_gwddr3_adapter (
 
     // ---- reader/writer simple side ----
     input  wire         rd,             // read pulse (reader)
-    input  wire         wr,             // write pulse (writer)
-    input  wire [25:0]  addr,           // 16-bit WORD address
-    input  wire [15:0]  din,            // write data (single word)
+    input  wire         wr,             // write pulse (writer): single masked word
+    input  wire         wr_beat,        // write pulse: FULL 128-bit beat (8 words, no mask)
+    input  wire [25:0]  addr,           // 16-bit WORD address (burst-aligned for wr_beat)
+    input  wire [15:0]  din,            // write data (single word, for wr)
+    input  wire [127:0] din_beat,       // write data (full 8-word beat, for wr_beat)
     output reg          busy,           // 0 = ready for a new rd/wr
     output reg          data_ready,     // read data valid (1 cyc)
     output reg  [15:0]  dout,           // the addressed 16-bit word
@@ -79,8 +81,17 @@ module groovy_gwddr3_adapter (
                             end else begin
                                 ip_addr<=burst_addr; sel_q<=word_sel; busy<=1'b1; st<=A_RD;
                             end
+                        end else if (wr_beat) begin
+                            // FULL 8-word beat write: one BL8, no mask, no read-modify-write.
+                            // addr is burst-aligned; the writer packed all 8 words in din_beat.
+                            ip_addr <= burst_addr;
+                            wr_data <= din_beat;
+                            wr_data_mask <= 16'd0;                    // all bytes enabled
+                            cache_vld<=1'b0;                          // a write invalidates the read cache
+                            busy<=1'b1; st<=A_WR;
                         end else if (wr) begin
                             // write the single word into its slot, mask the rest off.
+                            // (kept for partial-burst tails / odd single writes.)
                             ip_addr <= burst_addr;
                             wr_data <= {8{din}};                      // word in every slot
                             wr_data_mask <= ~(16'h3 << (word_sel*2)); // unmask only word_sel's 2 bytes

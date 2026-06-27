@@ -108,7 +108,7 @@ module gwddr3video_top (
     wire         ddr_data_ready, ddr_busy;
     groovy_gwddr3_adapter u_adapt (
         .uclk(pclk), .urst(ddr_rst), .init_calib_complete(init_calib_complete),
-        .rd(a_rd), .wr(a_wr), .addr(ddr_addr_m), .din(ddr_din),
+        .rd(a_rd), .wr(a_wr), .wr_beat(1'b0), .addr(ddr_addr_m), .din(ddr_din), .din_beat(128'd0),
         .busy(ddr_busy), .data_ready(ddr_data_ready), .dout(ddr_dout),
         .cmd(ip_cmd), .cmd_en(ip_cmd_en), .cmd_ready(ip_cmd_ready), .ip_addr(ip_addr),
         .wr_data(ip_wr_data), .wr_data_en(ip_wr_data_en), .wr_data_end(ip_wr_data_end),
