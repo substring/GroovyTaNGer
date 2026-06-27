@@ -262,38 +262,44 @@ def build(args) -> bytes:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Groovy_Tang protocol test sender")
+    p = argparse.ArgumentParser(
+        description="Groovy_Tang protocol test sender",
+        epilog="Run '<command> --help' for a command's own options "
+               "(e.g. 'blitfile --help' shows --refresh/--monitor/--dotclock-min).")
     p.add_argument("--host", required=True)
     p.add_argument("--port", type=int, default=DATA_PORT)
     p.add_argument("--timeout", type=float, default=1.0)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("close"); sub.add_parser("version"); sub.add_parser("status")
-    sub.add_parser("features")   # v2.0.0 capabilities query
-    sub.add_parser("srresult")   # v2.0.0 debug: read SWITCHRES mode-change math
-    i = sub.add_parser("init")
+    sub.add_parser("close",    help="CMD_CLOSE - end the session")
+    sub.add_parser("version",  help="CMD_GET_VERSION")
+    sub.add_parser("status",   help="CMD_GET_STATUS")
+    sub.add_parser("features", help="CMD_GET_FEATURES (v2.0.0 capabilities)")
+    sub.add_parser("srresult", help="CMD_GET_SWITCHRES_RESULT (v2.0.0 debug: PLL/super-res math)")
+    i = sub.add_parser("init", help="CMD_INIT - start a session (rgb mode, audio)")
     i.add_argument("--lz4", type=int, default=0)
     i.add_argument("--rate", type=int, default=0, help="0/22050/44100/48000")
     i.add_argument("--chan", type=int, default=2)
     i.add_argument("--rgb", type=int, default=None, help="omit for the 4-byte INIT form")
-    s = sub.add_parser("switchres")
+    s = sub.add_parser("switchres", help="CMD_SWITCHRES - send a raw modeline (manual fields)")
     for n, d in [("pclk", 25.175)]:
         s.add_argument(f"--{n}", type=float, default=d)
     for n, d in [("hactive", 640), ("hbegin", 656), ("hend", 752), ("htotal", 800),
                  ("vactive", 480), ("vbegin", 490), ("vend", 492), ("vtotal", 525),
                  ("interlace", 0)]:
         s.add_argument(f"--{n}", type=int, default=d)
-    b = sub.add_parser("blit")
+    b = sub.add_parser("blit", help="CMD_BLIT - raw 8-byte blit header only")
     b.add_argument("--frame", type=int, default=1)
     b.add_argument("--field", type=int, default=0)
     b.add_argument("--vsync", type=int, default=0)
-    bi = sub.add_parser("blitimg")    # INIT(rgb565) + BLIT header + a test frame
+    bi = sub.add_parser("blitimg", help="send a synthetic test gradient (INIT+BLIT+pixels)")
     bi.add_argument("--width", type=int, default=100)
     bi.add_argument("--height", type=int, default=75)
     bi.add_argument("--frame", type=int, default=1)
     bi.add_argument("--chunk", type=int, default=1440)
     bi.add_argument("--delay", type=float, default=0.002, help="seconds between datagrams")
     bi.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
-    bf = sub.add_parser("blitfile")   # NATIVE-res image -> switchres modeline -> blit
+    bf = sub.add_parser("blitfile",
+        help="send a PNG/BMP at NATIVE size; switchres computes+sends the CRT modeline")
     bf.add_argument("file", help="PNG/BMP/etc. - sent at its NATIVE size (no resize)")
     bf.add_argument("--refresh", type=float, default=60.0, help="target refresh Hz")
     bf.add_argument("--monitor", default="arcade_15",
@@ -304,7 +310,7 @@ def main():
     bf.add_argument("--chunk", type=int, default=1440)
     bf.add_argument("--delay", type=float, default=0.01, help="seconds between datagrams")
     bf.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
-    bs = sub.add_parser("blitstream")  # continuous animated frames (double-buffer test)
+    bs = sub.add_parser("blitstream", help="continuous animated frames (stream/double-buffer test)")
     bs.add_argument("--width", type=int, default=100)
     bs.add_argument("--height", type=int, default=75)
     bs.add_argument("--frames", type=int, default=600)
