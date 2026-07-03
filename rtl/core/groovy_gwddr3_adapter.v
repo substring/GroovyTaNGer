@@ -53,13 +53,21 @@ module groovy_gwddr3_adapter (
     // with ZERO extra IP traffic (1 real read per 8). A read whose burst address matches
     // the cache returns instantly (1-cyc data_ready); a miss does a real IP read first.
     // This cuts IP transactions 8x -> the fetch keeps up with the line rate.
-    localparam A_IDLE=2'd0, A_RD=2'd1, A_RWAIT=2'd2, A_WR=2'd3;
-    reg [1:0]   st = A_IDLE;
+    // Write is TWO phases on the Gowin IP: (1) command (cmd_en when cmd_ready),
+    // then (2) data (wr_data_en/_end when wr_data_rdy). wr_data_rdy can lag cmd_en
+    // by several cycles, so they must NOT be gated on the same cycle (the old A_WR
+    // did `cmd_ready && wr_data_rdy` together and lost writes when they didn't
+    // coincide). A_WCMD issues the command; A_WDATA waits for wr_data_rdy and
+    // supplies the beat.
+    localparam A_IDLE=3'd0, A_RD=3'd1, A_RWAIT=3'd2, A_WCMD=3'd3, A_WDATA=3'd4;
+    reg [2:0]   st = A_IDLE;
     reg [2:0]   sel_q;                   // which word of the beat we want
     reg [127:0] cache;                   // last fetched 128-bit beat
     reg [26:0]  cache_addr;              // burst address held in cache
     reg         cache_vld;               // cache holds valid data
     wire        cache_hit = cache_vld && (burst_addr == cache_addr);
+    reg [127:0] wdat_q;                  // beat data held across the cmd->data phases
+    reg [15:0]  wmask_q;                 // mask held across the phases
 
     always @(posedge uclk or posedge urst) begin
         if (urst) begin
@@ -67,6 +75,7 @@ module groovy_gwddr3_adapter (
             cmd<=3'd0; cmd_en<=1'b0; ip_addr<=27'd0;
             wr_data<=128'd0; wr_data_en<=1'b0; wr_data_end<=1'b0; wr_data_mask<=16'd0;
             cache<=128'd0; cache_addr<=27'h7FFFFFF; cache_vld<=1'b0;
+            wdat_q<=128'd0; wmask_q<=16'd0;
         end else begin
             cmd_en<=1'b0; wr_data_en<=1'b0; wr_data_end<=1'b0; data_ready<=1'b0;
             case (st)
@@ -85,18 +94,18 @@ module groovy_gwddr3_adapter (
                             // FULL 8-word beat write: one BL8, no mask, no read-modify-write.
                             // addr is burst-aligned; the writer packed all 8 words in din_beat.
                             ip_addr <= burst_addr;
-                            wr_data <= din_beat;
-                            wr_data_mask <= 16'd0;                    // all bytes enabled
+                            wdat_q  <= din_beat;
+                            wmask_q <= 16'd0;                         // all bytes enabled
                             cache_vld<=1'b0;                          // a write invalidates the read cache
-                            busy<=1'b1; st<=A_WR;
+                            busy<=1'b1; st<=A_WCMD;
                         end else if (wr) begin
                             // write the single word into its slot, mask the rest off.
                             // (kept for partial-burst tails / odd single writes.)
                             ip_addr <= burst_addr;
-                            wr_data <= {8{din}};                      // word in every slot
-                            wr_data_mask <= ~(16'h3 << (word_sel*2)); // unmask only word_sel's 2 bytes
+                            wdat_q  <= {8{din}};                      // word in every slot
+                            wmask_q <= ~(16'h3 << (word_sel*2));      // unmask only word_sel's 2 bytes
                             cache_vld<=1'b0;                          // a write invalidates the read cache
-                            busy<=1'b1; st<=A_WR;
+                            busy<=1'b1; st<=A_WCMD;
                         end
                     end
                 end
@@ -109,10 +118,27 @@ module groovy_gwddr3_adapter (
                     dout       <= rd_data[sel_q*16 +: 16];
                     data_ready <= 1'b1; busy<=1'b0; st<=A_IDLE;
                 end
-                // WRITE: issue write cmd + data together (gate on both readies).
-                A_WR: if (cmd_ready && wr_data_rdy) begin
-                    cmd<=3'd0; cmd_en<=1'b1; wr_data_en<=1'b1; wr_data_end<=1'b1;
-                    busy<=1'b0; st<=A_IDLE;
+                // WRITE phase 1: issue the write COMMAND when cmd_ready.
+                A_WCMD: if (cmd_ready) begin
+                    cmd<=3'd0; cmd_en<=1'b1;
+                    // present data fields now; if wr_data_rdy is already high the IP
+                    // takes them this cycle too, otherwise A_WDATA supplies them when
+                    // the IP requests via wr_data_rdy.
+                    wr_data<=wdat_q; wr_data_mask<=wmask_q;
+                    if (wr_data_rdy) begin
+                        wr_data_en<=1'b1; wr_data_end<=1'b1;   // BL8 single user-beat
+                        busy<=1'b0; st<=A_IDLE;
+                    end else begin
+                        st<=A_WDATA;
+                    end
+                end
+                // WRITE phase 2: supply the data beat when the IP asserts wr_data_rdy.
+                A_WDATA: begin
+                    wr_data<=wdat_q; wr_data_mask<=wmask_q;
+                    if (wr_data_rdy) begin
+                        wr_data_en<=1'b1; wr_data_end<=1'b1;
+                        busy<=1'b0; st<=A_IDLE;
+                    end
                 end
             endcase
         end

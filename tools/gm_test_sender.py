@@ -101,6 +101,43 @@ def gen_frame(w: int, h: int) -> bytes:
     return bytes(buf)
 
 
+# SOLID vertical colour bars (RGB565) - the EASY-TO-READ pattern for visual HW checks.
+# 8 bars across the width: black, red, green, yellow, blue, magenta, cyan, white. A defect
+# (wrong colour, torn/shifted bar, wrong line) is immediately obvious and describable -
+# unlike a gradient. Plus a distinct 1px white line at the very TOP and a red one at the
+# BOTTOM as vertical orientation/edge markers.
+BAR_COLORS = [0x0000, 0xF800, 0x07E0, 0xFFE0, 0x001F, 0xF81F, 0x07FF, 0xFFFF]
+def gen_bars(w: int, h: int, mark=3) -> bytes:
+    # VERTICAL colour bars. `mark` source rows thick for the edge markers so they survive
+    # V replication. (All source lines identical except markers -> can't reveal ring
+    # persistence; use gen_hbars for that.)
+    nbar = len(BAR_COLORS)
+    buf = bytearray()
+    for y in range(h):
+        for x in range(w):
+            if y < mark:            pix = 0xFFFF     # top edge marker (white band)
+            elif y >= h - mark:     pix = 0xF800     # bottom edge marker (red band)
+            else:                   pix = BAR_COLORS[(x * nbar) // w]
+            buf += struct.pack("<H", pix)
+    return bytes(buf)
+
+
+def gen_hbars(w: int, h: int) -> bytes:
+    # HORIZONTAL colour bars: each source LINE is a different solid colour (8 bands top
+    # to bottom). Lines DIFFER vertically, so if the stream stops and the ring replays its
+    # last ~NLINES lines, the screen freezes on those few lines (one/two colours stretched)
+    # instead of the full image - proving beam-race (ring != frame store). Also a per-line
+    # left-edge white marker (first 4 px) as a horizontal position reference.
+    nbar = len(BAR_COLORS)
+    buf = bytearray()
+    for y in range(h):
+        c = BAR_COLORS[(y * nbar) // h]
+        for x in range(w):
+            pix = 0xFFFF if x < 4 else c
+            buf += struct.pack("<H", pix)
+    return bytes(buf)
+
+
 def gen_frame_anim(w: int, h: int, phase: int) -> bytes:
     # gradient background + a 4px white vertical bar sweeping across (motion test).
     barx = phase % w
@@ -198,6 +235,92 @@ def load_image_rgb565(path):
             r, g, b = px[x, y]
             buf += struct.pack("<H", ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
     return w, h, bytes(buf)
+
+
+def _pace_until(t_target, spin_win=0.0015):
+    # Precise wait to t_target (perf_counter seconds). OS sleep() is coarse (esp. Windows,
+    # ~15ms granularity), so we SLEEP the bulk of a long wait then BUSY-SPIN the last
+    # spin_win seconds on perf_counter - which is precise on BOTH Windows and Linux (only
+    # sleep() is bad on Windows). This is what GroovyMAME's WaitSync does. The busy-spin
+    # burns a core for ~1.5ms per wait; fine for a dedicated sender.
+    now = time.perf_counter()
+    bulk = t_target - now - spin_win
+    if bulk > 0:
+        time.sleep(bulk)
+    while time.perf_counter() < t_target:
+        pass
+
+
+def send_blitrace(sock, addr, args):
+    # BEAM-RACE paced blit (OPEN-LOOP RATE MATCH). While blitting, the FPGA treats every
+    # datagram as pixel DATA (blit framing) and cannot answer CMD_GET_STATUS mid-frame,
+    # so per-line polling is impossible - exactly like stock GroovyMAME, which streams a
+    # frame's pixels at the GAME's pixel rate. We do the same: send the frame's source
+    # lines at a fixed cadence tuned to the FPGA raster's consumption rate, so the write
+    # pointer tracks the read pointer within the line-ring depth (NLINES). The FIFO+ring
+    # absorb jitter; the FPGA's OV (fifo_overflow) flag catches over-run (send too fast),
+    # a persistent UR (underrun) means too slow. Tune --linerate to sit between.
+    #
+    # Consumption rate: the reader drains SRC_H source lines per FRAME PERIOD (1/refresh),
+    # so the sustainable average is line_period = 1/(refresh*h). We send lines_per_dgram
+    # lines per datagram and sleep line_period*lines_per_dgram between datagrams, scaled
+    # by --linerate (1.0 = match; >1 = send faster/ahead, <1 = slower).
+    if args.file:
+        w, h, frame = load_image_rgb565(args.file)
+        ml = calc_modeline(w, h, args.refresh, args.monitor, args.dotclock_min)
+        print(f"image {w}x{h} -> modeline '{ml['name']}' pclk={ml['pclk_mhz']:.3f}MHz "
+              f"(H super-res x{ml['hact']//w if w else 1})")
+        sock.sendto(struct.pack("<BdHHHHHHHHB", CMD_SWITCHRES, ml['pclk_mhz'],
+                                ml['hact'], ml['hbeg'], ml['hend'], ml['htot'],
+                                ml['vact'], ml['vbeg'], ml['vend'], ml['vtot'],
+                                ml['interlace']), addr)
+        time.sleep(0.1)
+    else:
+        w, h = args.width, args.height
+        frame = {"bars": gen_bars, "hbars": gen_hbars,
+                 "gradient": gen_frame}[args.pattern](w, h)
+        print(f"pattern: {args.pattern} {w}x{h}")
+
+    line_bytes = w * 2                                     # RGB565 = 2 B/px
+    sock.settimeout(0.5)
+    sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)   # rgb565
+    try: print(decode_reply(sock.recvfrom(64)[0]))
+    except socket.timeout: print("(no INIT ack)")
+
+    # pacing: one source line consumed every line_period on average. BUSY-SPIN cadence
+    # (perf_counter, OS-timer-independent) is essential - sleep() drifts ~700 lines/s on
+    # Windows (PoC-proven). The cadence is CONTINUOUS across frames (t_next never resets),
+    # so a static image = a continuous stream of the same frame, writer & reader locked.
+    line_period = 1.0 / (args.refresh * h) if h else 0.0
+    lpd    = max(1, args.group)                            # lines per datagram
+    period = line_period * lpd / max(args.linerate, 1e-6) # time between datagrams
+    print(f"pacing: line_period={line_period*1e6:.1f}us, {lpd} line(s)/dgram, "
+          f"period={period*1e6:.1f}us (linerate={args.linerate}, busy-spin)")
+
+    frames = args.frames
+    t_next = time.perf_counter()
+    for f in range(frames):
+        # HEADER GAP: leave a short gap before each frame's BLIT header so the FPGA sees
+        # `blitting` fall (end of previous frame's pixels) BEFORE the new header arrives.
+        # Without it, at full rate the next header telescopes the last pixels -> the parser
+        # (which only sees commands while !blitting) misses it -> the writer stalls after
+        # one frame. This is a stand-in for the vblank window (Step 2). Skip for frame 0.
+        if f > 0 and args.header_gap > 0:
+            _pace_until(t_next + args.header_gap)
+            t_next += args.header_gap
+        # vsync>0 = beam-race target; header per frame.
+        sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, f + 1, 0, args.vsync), addr)
+        sent = 0
+        while sent < h:
+            n = min(lpd, h - sent)
+            off = sent * line_bytes
+            sock.sendto(frame[off:off + n * line_bytes], addr)
+            sent += n
+            t_next += period
+            _pace_until(t_next)                            # precise busy-spin cadence
+        if args.verbose:
+            print(f"frame {f+1}: streamed {h} lines")
+    print(f"blitrace: {frames} frame(s) {w}x{h}, busy-spin paced -> {addr[0]}:{addr[1]}")
 
 
 def send_blitfile(sock, addr, args):
@@ -310,6 +433,26 @@ def main():
     bf.add_argument("--chunk", type=int, default=1440)
     bf.add_argument("--delay", type=float, default=0.01, help="seconds between datagrams")
     bf.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
+    br = sub.add_parser("blitrace",
+        help="BEAM-RACE paced blit (open-loop rate match): streams a frame's lines at a "
+             "fixed cadence tuned to the FPGA raster consumption so the line-ring tracks "
+             "(no over/underrun). Tune --linerate; watch the FPGA OV/UR flags")
+    br.add_argument("--width", type=int, default=320)
+    br.add_argument("--height", type=int, default=240)
+    br.add_argument("--file", default=None, help="native image (runs switchres); omit for a gradient")
+    br.add_argument("--linerate", type=float, default=1.0,
+                    help="send-rate scale vs raster consumption (1.0=match, >1 faster, <1 slower)")
+    br.add_argument("--group", type=int, default=2, help="source lines per datagram (2 = sweet spot; keep datagram <= MTU)")
+    br.add_argument("--pattern", choices=["bars", "hbars", "gradient"], default="bars",
+                    help="bars=vertical colour bars, hbars=horizontal (reveals ring persistence), gradient")
+    br.add_argument("--header-gap", type=float, default=0.0005,
+                    help="seconds of quiet before each frame's BLIT header (lets blitting fall)")
+    br.add_argument("--frames", type=int, default=1)
+    br.add_argument("--vsync", type=int, default=1, help=">0 = beam-race target line")
+    br.add_argument("--refresh", type=float, default=60.0, help="refresh Hz (sets line cadence)")
+    br.add_argument("--monitor", default="arcade_15")
+    br.add_argument("--dotclock-min", dest="dotclock_min", type=float, default=25.0)
+    br.add_argument("--verbose", action="store_true")
     bs = sub.add_parser("blitstream", help="continuous animated frames (stream/double-buffer test)")
     bs.add_argument("--width", type=int, default=100)
     bs.add_argument("--height", type=int, default=75)
@@ -320,11 +463,11 @@ def main():
     bs.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     args = p.parse_args()
 
-    if args.cmd in ("blitimg", "blitstream", "blitfile"):
+    if args.cmd in ("blitimg", "blitstream", "blitfile", "blitrace"):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(args.timeout)
         dispatch = {"blitimg": send_blitimg, "blitstream": send_blitstream,
-                    "blitfile": send_blitfile}
+                    "blitfile": send_blitfile, "blitrace": send_blitrace}
         dispatch[args.cmd](sock, (args.host, args.port), args)
         return
 

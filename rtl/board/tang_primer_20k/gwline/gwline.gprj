@@ -1,0 +1,38 @@
+<?xml version="1" encoding="UTF-8"?>
+<!DOCTYPE gowin-fpga-project>
+<Project>
+    <Template>FPGA</Template>
+    <Version>5</Version>
+    <Device name="GW2A-18C" pn="GW2A-LV18PG256C8/I7">gw2a18c-011</Device>
+    <FileList>
+        <!-- BRAM line ring (replaces DDR3) -->
+        <File path="../../../core/groovy_lineram.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_lineram_wr.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_lineram_scan.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_sync_fifo.v" type="file.verilog" enable="1"/>
+        <!-- Network stack -->
+        <File path="../../../vendor/sipeed_udp/PLL_6M.v" type="file.verilog" enable="1"/>
+        <File path="../../../vendor/sipeed_udp/udp.sv" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_packet_parser.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_session.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_ack_policy.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_ack_sender.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_features.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_tx_arbiter.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_switchres.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/pclk_double_to_khz.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_pll_solver.v" type="file.verilog" enable="1"/>
+        <File path="../../../generic/video/superres_factor.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_blit_rx.v" type="file.verilog" enable="1"/>
+        <!-- Video: timing gen, DVI, UART -->
+        <File path="../../../vendor/nand2mario_ddr3/uart_tx_V2.v" type="file.verilog" enable="1"/>
+        <File path="../../../vendor/gowin/rpll_tmds.v" type="file.verilog" enable="1"/>
+        <File path="../../../generic/video/video_timing_gen.v" type="file.verilog" enable="1"/>
+        <File path="../video/dvi_tx/dvi_tx.v" type="file.verilog" enable="1"/>
+        <!-- top + constraints -->
+        <File path="gwline_top.sv" type="file.verilog" enable="1"/>
+        <File path="rmii.svh" type="file.other" enable="1"/>
+        <File path="gwline.cst" type="file.cst" enable="1"/>
+        <File path="gwline.sdc" type="file.sdc" enable="1"/>
+    </FileList>
+</Project>
