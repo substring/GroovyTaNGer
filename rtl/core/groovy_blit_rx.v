@@ -13,10 +13,20 @@
 //   2 = RGB565 (wire: little-endian, byte0=low)   [first-picture path]
 //   3 = RGB888 (wire byte order R,G,B [A VERIFIER]) -> packed to 565
 // (rgbMode 1 = 4-byte RGBA is a later add.)
+//
+// TIMEOUT (ROOT-CAUSE FIX, 2026-07-03): a single lost UDP pixel datagram means
+// bytes_recv never reaches bytes_len -> blitting would stay 1 FOREVER -> the top
+// gates the parser off while blitting -> the next CMD_BLIT header is never seen ->
+// permanent freeze (see memory udp-rx-bottleneck). Fix: if blitting is stuck with no
+// incoming byte for TIMEOUT_CYCLES, abort the frame and re-arm. A loss then costs one
+// frame, not the whole session. TIMEOUT_CYCLES defaults to 1ms @50MHz - far above the
+// normal inter-datagram gap (~51us/line at 100Mb/s) but short enough not to hang the
+// display for long.
 `default_nettype none
 
 module groovy_blit_rx #(
-    parameter integer ADDR_W = 17           // pixels per framebuffer (<=131072)
+    parameter integer ADDR_W = 17,          // pixels per framebuffer (<=131072)
+    parameter integer TIMEOUT_CYCLES = 50000 // ~1ms @ 50MHz: abort a stalled blit
 ) (
     input  wire                clk,
     input  wire                rst,
@@ -29,6 +39,7 @@ module groovy_blit_rx #(
     output reg                 blitting,
     output reg                 frame_done,   // 1-cycle pulse at end of frame
     output reg  [31:0]         bytes_recv,
+    output reg                 timed_out,    // 1-cycle pulse: aborted on a stalled blit
 
     output reg                 wr_en,        // 1-cycle per assembled pixel
     output reg  [ADDR_W-1:0]   wr_addr,      // pixel index
@@ -37,6 +48,7 @@ module groovy_blit_rx #(
     reg [1:0]        bcnt;        // byte within the current pixel (0..bytespp-1)
     reg [7:0]        b0, b1;      // gathered bytes
     reg [ADDR_W-1:0] pix_idx;     // running pixel index
+    reg [31:0]       idle_cnt;    // cycles since the last accepted byte, while blitting
 
     // pack the just-completed pixel to RGB565
     function [15:0] pack565;
@@ -50,12 +62,16 @@ module groovy_blit_rx #(
     always @(posedge clk) begin
         wr_en      <= 1'b0;
         frame_done <= 1'b0;
+        timed_out  <= 1'b0;
         if (rst) begin
             blitting<=1'b0; bytes_recv<=32'd0; bcnt<=2'd0; pix_idx<={ADDR_W{1'b0}};
+            idle_cnt<=32'd0;
         end else if (start) begin
             blitting<=1'b1; bytes_recv<=32'd0; bcnt<=2'd0; pix_idx<={ADDR_W{1'b0}};
+            idle_cnt<=32'd0;
         end else if (blitting && in_valid) begin
             bytes_recv <= bytes_recv + 32'd1;
+            idle_cnt   <= 32'd0;                     // byte arrived: reset the watchdog
 
             // gather bytes into a pixel
             if (bcnt == 2'd0)      b0 <= in_data;
@@ -76,6 +92,14 @@ module groovy_blit_rx #(
             if (bytes_recv + 32'd1 >= bytes_len) begin
                 blitting   <= 1'b0;
                 frame_done <= 1'b1;
+            end
+        end else if (blitting) begin
+            // no byte this cycle while still blitting: count idle time, abort on timeout
+            if (idle_cnt >= TIMEOUT_CYCLES[31:0]) begin
+                blitting  <= 1'b0;                   // re-arm: parser can see the next header
+                timed_out <= 1'b1;
+            end else begin
+                idle_cnt <= idle_cnt + 32'd1;
             end
         end
     end

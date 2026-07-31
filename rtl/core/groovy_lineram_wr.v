@@ -1,104 +1,193 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Groovy_Tang - line-ring write mapper (beam-race write side).
+// Groovy_Tang - line-ring write mapper (beam-race write side). REWRITTEN 2026-07-20
+// from scratch (not a copy of the prior version) after a session diagnosing why the
+// ring writer stalled under real network bursts, to make the write path's own state
+// directly observable (fifo_level_at_write / target_slot_at_write) instead of only
+// inferring it from downstream symptoms.
 //
-// Drains an elastic FIFO (groovy_sync_fifo, fed by groovy_blit_rx at net speed) into
-// groovy_lineram, paced by the ring lap-guard. Derives {slot, col} incrementally from
-// the pixel stream (like groovy_writeline): col counts 0..native_w-1, wrapping to
-// advance the source line; slot = line mod NLINES (low bits). Exposes write_line
-// (fully-written line count) for the top's beam-race feedback / invariant.
+// ROLE: drain an elastic FIFO (groovy_sync_fifo, filled by groovy_blit_rx at raw
+// network speed, no back-pressure of its own) into groovy_lineram, one pixel per
+// cycle when allowed. Track two positions in the incoming pixel stream:
+//   col  - column within the CURRENT source line (0..native_w-1)
+//   line - the CURRENT source line index, monotonic (see below)
+// A line is "done" the instant its last column lands; that pulses write_line and
+// (if the write was real, not a dropped pixel) marks the slot's ground truth.
 //
-// RING INVARIANT GUARD: the writer must not LAP the reader (overwrite a slot the reader
-// still needs). We take the reader's current source line (CDC'd in by the top) and only
-// POP the FIFO when writing would NOT violate write_line - read_line < NLINES. A
-// lap-stalled pixel is HELD IN THE FIFO (pop deasserts) instead of dropped - the FIFO
-// is the back-pressure that groovy_blit_rx itself lacks. If the host outruns the raster
-// for longer than the FIFO is deep, the FIFO (not this mapper) flags overflow.
+// GUARD RULE (kept as validated this session, not re-derived here - see the guard
+// block below for the exact rationale; may be revisited to protect actual reader
+// LINES rather than a slot window, in a later pass): a slot may be written UNLESS it
+// falls in the reader's near-future window (its current slot + MARGIN-1 ahead, wrapped
+// mod NLINES). Everything else - including running arbitrarily far ahead of the
+// reader in absolute line count - is fair game. The comparison is done on SLOT
+// numbers (line mod NLINES), never on raw line/read_line values - an earlier version
+// compared raw values and was wrong in 43% of cases (verified by brute-force
+// enumeration), because a slot's protection status only depends on where it sits in
+// the ring's own wrap order, not on how far apart the two line counters happen to be.
 //
-// Handshake to the FIFO: pop = in_valid (!empty) && !lap. The popped word is registered
-// as this mapper's ring write in the SAME cycle, so ring `we` == pop delayed 0 (we
-// assert we on the cycle we accept the word). One-cycle FIFO read latency is fine: on
-// pop we read mem[rptr] which is the head word already present (first-word-fall-through
-// style: rd_data is combinational at the head).
-//
-// MONOTONIC line counter (the wrap-safe fix): `line` / `write_line` NEVER reset to 0 -
-// they keep counting across frames (frame 0: 0..H-1, frame 1: H..2H-1, ...). The ring
-// SLOT still wraps (line mod NLINES) - that's intended - but the write_line-read_line
-// DISTANCE is now always the true small gap, so a raster wrap (read jumping frames) can
-// never make the guard falsely see a huge lead and trap the writer. blit_valid only
-// realigns the COLUMN (col<-0) at a new source frame; `line` marches on. `read_line`
-// (CDC'd from the reader) is likewise monotonic - the two share a common origin set at
-// SYNC/FILL and the host pacing keeps them within NLINES.
+// DROPPED-PIXEL RECOVERY: if the FIFO was full when blit_rx tried to push (no
+// back-pressure exists upstream of the FIFO), that pixel is gone - but col/line must
+// still advance as if it had landed, or the position counters desync from the real
+// column the network is now sending, corrupting every later pixel in the line, not
+// just the lost one. The slot's ground truth (sl_*) is NOT updated for a lost pixel -
+// its content is stale, not what its slot_line claims, and the reader-side stale-slot
+// check (groovy_lineram_scan.v) is what actually protects display from showing it.
 `default_nettype none
 
 module groovy_lineram_wr #(
     parameter integer NLINES  = 8,
     parameter integer LNSEL_W = 3,
     parameter integer COL_W   = 10,
-    parameter integer DATA_W  = 16
+    parameter integer DATA_W  = 16,
+    parameter integer MARGIN  = 16,   // reader's protected near-future window width;
+                                       // same value/meaning as the top's SYNC/FILL
+                                       // threshold, passed in rather than duplicated
+    parameter integer ADDR_W_FIFO = 12  // must match the upstream FIFO's ADDR_W, so
+                                         // fifo_level's width (ADDR_W_FIFO+1 bits, per
+                                         // groovy_sync_fifo's own level port) lines up
 ) (
-    input  wire                 clk,          // network/write clock (clk50m)
+    input  wire                 clk,
     input  wire                 rst,
-    input  wire                 frame_start,  // pulse: new frame (blit_valid)
+    input  wire                 frame_start,   // pulse: a new network frame began
 
-    // from the elastic FIFO (fed by blit_rx). in_valid = FIFO !empty.
-    input  wire                 in_valid,
-    input  wire [DATA_W-1:0]    in_data,      // FIFO head word (combinational)
-    output wire                 pop,          // FIFO rd_en: 1 when we accept in_data
-    input  wire [15:0]          native_w,     // source pixels per line
+    // upstream elastic FIFO (blit_rx -> here)
+    input  wire                 in_valid,      // FIFO has a word ready (!empty)
+    input  wire [DATA_W-1:0]    in_data,       // FIFO head word (combinational)
+    output wire                 pop,           // FIFO rd_en: pulse to consume in_data
+    input  wire [15:0]          native_w,      // source pixels per line
+    input  wire                 fifo_overflow, // pulse: upstream just dropped a pixel
 
-    // ring flow control: reader's current source line (CDC'd from pix_clk by the top)
+    // DIAGNOSTIC (2026-07-20): live FIFO fill level, sampled the cycle we act on a
+    // pixel (accept or drop) - lets the top/UART show how full the buffer was AT THE
+    // MOMENT of each write decision, not just after the fact via full/empty edges.
+    // Width is ADDR_W_FIFO+1 to match groovy_sync_fifo's own fifo_level port exactly
+    // (its counter needs one extra bit to represent "completely full", DEPTH itself).
+    input  wire [ADDR_W_FIFO:0] fifo_level,
+
+    // reader position (CDC'd from pix_clk by the top) and guard enable (held off
+    // during SYNC/FILL, before the reader has a real position to compare against)
     input  wire [15:0]          read_line,
+    input  wire                 guard_en,
 
-    // to groovy_lineram write port
+    // ring write port
     output reg                  we,
     output reg  [LNSEL_W-1:0]   w_slot,
     output reg  [COL_W-1:0]     w_col,
     output reg  [DATA_W-1:0]    w_data,
 
     // status
-    output reg  [15:0]          write_line,   // count of fully-written source lines
-    output wire                 stall         // high when held off by the ring guard
+    output reg  [15:0]          write_line,    // count of fully-written source lines
+    output wire                 stall,         // 1 when the guard is holding the writer
+
+    // per-slot ground truth feed (top wires this into groovy_slotline_ram)
+    output reg                  sl_we,
+    output reg  [LNSEL_W-1:0]   sl_slot,
+    output reg  [15:0]          sl_line,
+
+    // DIAGNOSTIC (2026-07-20): the ring slot a write decision is being made FOR, valid
+    // the same cycle as `we`/the fifo_overflow branch - lets the top capture "which
+    // slot, and how full was the FIFO" for every real write or drop, instead of only
+    // the aggregate counters (write_line, stall) previously available.
+    output reg  [LNSEL_W-1:0]   target_slot_at_write,
+    output reg  [ADDR_W_FIFO:0] fifo_level_at_write
 );
-    reg [15:0] col;       // column within the current source line
-    reg [15:0] line;      // current source line being written
+    reg [15:0] col;    // column within the line currently being written
+    reg [15:0] line;   // current source line index (monotonic across one frame)
 
-    // Would writing the current line lap the reader? WRAP-SAFE: `gap` is the modulo-2^16
-    // distance the writer is ahead of the reader (line - read_line as unsigned wraps
-    // correctly as long as the real gap < 32768, which the read<=write clamp guarantees).
-    // Lap when the writer would run NLINES ahead. read_line is the CLAMPED reader line
-    // (never past write), so the writer never sees a bogus huge gap and never false-traps.
-    wire [15:0] gap = line - read_line;
-    wire lap = (gap >= NLINES[15:0]) && (gap < 16'h8000);
-    assign stall = lap;
+    // CLEAR SWEEP: on rst (includes a CMD_INIT-driven video reset from the top), walk
+    // all NLINES slot_line entries back to the FFFF "never written this session"
+    // sentinel before accepting any pixel. Needed because groovy_slotline_ram is a
+    // real BRAM on hardware - its content is whatever was left from a PREVIOUS test
+    // until explicitly cleared, which would make SL=FFFF unreliable exactly when it's
+    // needed most (right after a reset). NLINES cycles is negligible next to a frame.
+    reg             clearing;
+    reg [LNSEL_W:0] clear_idx;
 
-    // Accept a pixel from the FIFO only when one is present AND placing it would not lap
-    // the reader. This is the back-pressure: a held pixel stays in the FIFO.
-    wire accept = in_valid && !lap;
-    assign pop = accept;
+    // GUARD: forbid writing a slot in the reader's near-future window. slot_off is the
+    // wrap-safe distance (mod NLINES) from the reader's current slot to the candidate
+    // write slot; forbidden when that distance is small (the reader is at it or about
+    // to reach it soon), safe when large (the reader already passed it and won't
+    // return until wrapping all the way around).
+    wire [LNSEL_W-1:0] candidate_slot = line[LNSEL_W-1:0];
+    wire [LNSEL_W-1:0] reader_slot    = read_line[LNSEL_W-1:0];
+    wire [LNSEL_W-1:0] slot_off       = candidate_slot - reader_slot;
+    wire               guard_blocks   = guard_en && (slot_off < MARGIN[LNSEL_W-1:0]);
+    assign stall = guard_blocks;
+
+    wire accept = in_valid && !guard_blocks && !clearing;
+    assign pop  = accept;
 
     always @(posedge clk) begin
-        we <= 1'b0;
+        we    <= 1'b0;
+        sl_we <= 1'b0;
+
         if (rst) begin
-            // full reset ONLY on hard reset: monotonic counters start at 0.
             col <= 16'd0; line <= 16'd0; write_line <= 16'd0;
             w_slot <= {LNSEL_W{1'b0}}; w_col <= {COL_W{1'b0}}; w_data <= {DATA_W{1'b0}};
+            clearing <= 1'b1; clear_idx <= {(LNSEL_W+1){1'b0}};
+            target_slot_at_write <= {LNSEL_W{1'b0}};
+            fifo_level_at_write  <= {(ADDR_W_FIFO+1){1'b0}};
+
+        end else if (clearing) begin
+            sl_we   <= 1'b1;
+            sl_slot <= clear_idx[LNSEL_W-1:0];
+            sl_line <= 16'hFFFF;
+            clear_idx <= clear_idx + 1'b1;
+            if (clear_idx == NLINES[LNSEL_W:0] - 1) clearing <= 1'b0;
+
         end else if (frame_start) begin
-            // new SOURCE frame: realign BOTH col and line to 0. line is now PER-FRAME
-            // (bounded 0..SRC_H-1), matching the reader's per-frame line - neither can
-            // overflow 16 bits (the ~2s degeneration was a monotonic counter passing
-            // 32768). write_line likewise restarts each frame. Slot = line mod NLINES.
+            // A new network frame restarts both counters at 0 - line is per-frame
+            // (bounded 0..SRC_H-1), matching how the reader indexes its own position,
+            // so neither counter risks the 16-bit wraparound a fully monotonic
+            // across-frames counter would eventually hit.
             col <= 16'd0; line <= 16'd0; write_line <= 16'd0;
+
         end else if (accept) begin
-            // place this pixel
+            // Real write: capture the diagnostic snapshot for THIS decision...
+            target_slot_at_write <= candidate_slot;
+            fifo_level_at_write  <= fifo_level;
+            // ...then place the pixel.
             we     <= 1'b1;
-            w_slot <= line[LNSEL_W-1:0];       // line mod NLINES (power of two)
+            w_slot <= candidate_slot;
             w_col  <= col[COL_W-1:0];
             w_data <= in_data;
-            // advance col / line
+
+            // Mark the slot "being rewritten" from the FIRST pixel of a new line, not
+            // only once the whole line lands - a reader sampling mid-rewrite otherwise
+            // sees a genuine mix of the old line's untouched columns and the new
+            // line's just-written ones, while slot_line still claims the OLD line was
+            // complete and correct. 0xFFFE is reserved (no real line index reaches it).
+            if (col == 16'd0) begin
+                sl_we   <= 1'b1;
+                sl_slot <= candidate_slot;
+                sl_line <= 16'hFFFE;
+            end
+
             if (col + 16'd1 >= native_w) begin
                 col        <= 16'd0;
                 line       <= line + 16'd1;
-                write_line <= line + 16'd1;     // this line is now fully written
+                write_line <= line + 16'd1;
+                sl_we      <= 1'b1;             // this slot now REALLY holds `line`
+                sl_slot    <= candidate_slot;
+                sl_line    <= line;
+            end else begin
+                col <= col + 16'd1;
+            end
+
+        end else if (fifo_overflow) begin
+            // Same diagnostic snapshot for a DROPPED pixel, so the top can tell "the
+            // guard held us off" (accept path, stall=1) apart from "we were allowed to
+            // write but the FIFO had already lost the pixel upstream" (this path).
+            target_slot_at_write <= candidate_slot;
+            fifo_level_at_write  <= fifo_level;
+
+            // Advance position counters as if the pixel had landed - it must, or every
+            // later column in this line reads at the wrong offset - but do NOT touch
+            // we/sl_we: no real data exists for this column, and the slot's ground
+            // truth must keep pointing at whatever it last REALLY held.
+            if (col + 16'd1 >= native_w) begin
+                col        <= 16'd0;
+                line       <= line + 16'd1;
+                write_line <= line + 16'd1;
             end else begin
                 col <= col + 16'd1;
             end

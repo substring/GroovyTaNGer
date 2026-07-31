@@ -12,13 +12,16 @@
 // before the BRAM and delay de/hs/vs to match. RGB565 (16-bit) here; RGB888 is a later
 // widening (DATA_W + the r/g/b extraction).
 //
-// MONOTONIC read line (the wrap-safe fix): `src_line` is NOT the per-frame raster line
-// (which resets to 0 every video frame and would make the write-side guard falsely see a
-// huge lead -> the freeze bug). Instead we count video frames and export a monotonic
-// index = frame_count*SRC_H + (vcount/V_REPL). The ring SLOT still uses the low bits
-// (mod NLINES) so it wraps as intended, but the exported src_line marches on so
-// write_line-read_line is always the true small gap. The top CDCs this to clk50m for the
-// ring lap-guard and feeds it to the vCount ACK.
+// TWO read lines are exported: `src_line` is the TRUE (unclamped) raster position, used
+// only for host feedback. `read_guard` is a LATCHED, underrun-clamped line used by the
+// writer's overwrite guard - see the "UNDERRUN clamp" comment below for why a plain
+// combinational clamp is not enough (it was found to still wedge the writer, 2026-07-10:
+// the free-running video raster completes MANY loops per network-paced source frame, so a
+// combinational `sline_raster >= max_line ? wr_top : sline_raster` briefly looks
+// "legitimately behind" every time the raster wraps back near 0, even though nothing new
+// was actually written - this repeatedly fooled the writer's lap-guard into thinking the
+// reader was far behind when it wasn't, stalling the writer after a small number of lines
+// (reproduced in sim/tb/groovy_lineram_freeraster_tb.v with a non-cooperative raster).
 `default_nettype none
 
 module groovy_lineram_scan #(
@@ -55,14 +58,30 @@ module groovy_lineram_scan #(
     output reg  [COL_W-1:0]     r_col,
     input  wire [DATA_W-1:0]    r_data,
 
+    // per-slot ground truth (groovy_slotline_ram, same read latency as r_data - both are
+    // a single synchronous output register on rd_clk/pix_clk, addressed by the same
+    // r_slot). CORRECTNESS FIX (2026-07-19): groovy_lineram_wr's fifo_overflow recovery
+    // lets write_line advance past a slot that was never actually rewritten this lap, so
+    // that slot's PHYSICAL content is an older source line (line - k*NLINES). Comparing
+    // slot_actual_line against the line we expect (the address we issued) catches this
+    // and freezes the pixel instead of showing a stale line as if it were current
+    // (reproduced on HW: sf2.png displayed a mid-frame block repeating from frame start).
+    input  wire [15:0]          slot_actual_line,
+
     // scaled pixel out (RGB565 path) + delayed sync, aligned to the BRAM latency
     output reg  [15:0]          pix_rgb565,
     output reg                  de_o,
     output reg                  hs_o,
     output reg                  vs_o,
 
-    // MONOTONIC source line being scanned (for the ring guard + vCount ACK)
-    output wire [15:0]          src_line
+    // TWO read-line outputs, deliberately different:
+    //   src_line   = the TRUE raster position (sline_raster) -> for the vCount ACK / host
+    //                phase lock. The host needs where the beam really is.
+    //   read_guard = the CLAMPED read line (sline_frame, <= write) -> for the WRITER's
+    //                overwrite guard. The guard needs read<=write or the free raster
+    //                (which sprints ahead) makes the guard stall by fits -> FIFO overflow.
+    output wire [15:0]          src_line,
+    output wire [15:0]          read_guard
 );
     // STABLE addressing: the read line is the raster's per-frame source line, derived
     // straight from vcount (0..SRC_H-1, wraps cleanly every video frame). NO monotonic
@@ -70,16 +89,46 @@ module groovy_lineram_scan #(
     // clamp, casting garbage. The ring SLOT = sline_frame mod NLINES; the raster always
     // reads "the source line at my current screen position". Phase alignment (writer puts
     // the right line in that slot in time) is a SEPARATE concern (host-mastered, later).
-    // max_line is unused here now - kept in the port list for the write-side guard/ACK.
-    wire [15:0] sline_frame = (V_REPL == 1) ? vcount :
-                              (V_REPL == 2) ? (vcount >> 1) :
-                              (V_REPL == 4) ? (vcount >> 2) :
-                                              vcount / V_REPL[15:0];
+    wire [15:0] sline_raster = (V_REPL == 1) ? vcount :
+                               (V_REPL == 2) ? (vcount >> 1) :
+                               (V_REPL == 4) ? (vcount >> 2) :
+                                               vcount / V_REPL[15:0];
     wire [15:0] scol = hcount >> H_SH;
 
-    // Export the per-frame read line (bounded, never overflows). Informative for the host
-    // and the write-side guard; 0 while held in reset (pre-have_frame) for a clean start.
-    assign src_line = pix_rst ? 16'd0 : sline_frame;
+    // UNDERRUN clamp, LATCHED (not a plain combinational compare - see the module header
+    // for why). The raster line (sline_raster) may run ahead of what the writer has
+    // committed this frame (max_line = write_line, a COUNT). If so, reading that slot
+    // returns a not-yet-written (stale/other-frame) line -> visible corruption. Once the
+    // raster has caught up to wr_top (the last written line), STAY there - do not follow
+    // sline_raster back down when the free-running video raster wraps to a new loop while
+    // the writer is still stuck on the same source frame. Only two ways to unstick:
+    //   (a) max_line advances past the displayed line (the writer wrote more - display can
+    //       advance again, still clamped to the new wr_top), or
+    //   (b) frame_start (a genuinely new source frame) - explicit realign to 0.
+    // This makes read_guard MONOTONIC WITHIN A SOURCE FRAME regardless of how many video
+    // raster loops occur while waiting, which is what the writer's lap-guard needs.
+    wire [15:0] wr_top = (max_line == 16'd0) ? 16'd0 : (max_line - 16'd1);
+    reg  [15:0] disp_line;                    // latched, clamp-aware displayed line
+    always @(posedge pix_clk) begin
+        if (pix_rst || frame_start) begin
+            disp_line <= 16'd0;
+        end else if (sline_raster < wr_top && sline_raster >= disp_line) begin
+            // raster is progressing normally within this source frame and hasn't
+            // caught up to the writer yet - follow it.
+            disp_line <= sline_raster;
+        end else begin
+            // raster has caught up to (or passed) the writer, OR it just wrapped to a
+            // new video loop (sline_raster < disp_line) - hold at the writer's last
+            // committed line either way.
+            disp_line <= wr_top;
+        end
+    end
+    wire [15:0] sline_frame = disp_line;
+
+    // src_line = TRUE raster position (for the ACK / host phase lock).
+    // read_guard = LATCHED clamped read line (for the writer's overwrite guard).
+    assign src_line   = pix_rst ? 16'd0 : sline_raster;
+    assign read_guard = pix_rst ? 16'd0 : sline_frame;
 
     // ---- pipeline (3-stage, matched to the TRUE data latency) ----
     // The address -> pixel path has TWO register stages before r_data is right:
@@ -91,20 +140,31 @@ module groovy_lineram_scan #(
     // was one short -> at a barr boundary one output pixel showed the PREVIOUS column's
     // data = the thin dark/blue seam the user saw between colour bars). de1->de2->de_o.
     reg de1, hs1, vs1, de2, hs2, vs2;
+    reg [15:0] expect_line1, expect_line2;   // sline_frame carried alongside the pipeline
     always @(posedge pix_clk) begin
         if (pix_rst) begin
             r_slot<=0; r_col<=0; de1<=0; hs1<=0; vs1<=0; de2<=0; hs2<=0; vs2<=0;
             de_o<=0; hs_o<=0; vs_o<=0; pix_rgb565<=16'd0;
+            expect_line1<=16'd0; expect_line2<=16'd0;
         end else begin
             // stage 1: register the ring address (slot = per-frame line mod NLINES)
             r_slot <= sline_frame[LNSEL_W-1:0];
             r_col  <= scol[COL_W-1:0];
+            expect_line1 <= sline_frame;
             de1<=de;   hs1<=hsync; vs1<=vsync;
             // stage 2: ring output reg is latching now; sync rides along
+            expect_line2 <= expect_line1;
             de2<=de1;  hs2<=hs1;   vs2<=vs1;
-            // stage 3: r_data now valid for the stage-1 address; present it, sync aligned
+            // stage 3: r_data (and slot_actual_line) now valid for the stage-1 address.
+            // If the slot doesn't actually hold the line we addressed, it's stale (a
+            // dropped-pixel recovery left it un-rewritten this lap) - hold the LAST
+            // pixel instead of showing wrong-lap content as if it were current.
             de_o<=de2; hs_o<=hs2;  vs_o<=vs2;
-            pix_rgb565 <= de2 ? r_data[15:0] : 16'd0;
+            if (de2 && slot_actual_line == expect_line2)
+                pix_rgb565 <= r_data[15:0];
+            else if (!de2)
+                pix_rgb565 <= 16'd0;
+            // else: stale slot - hold previous pix_rgb565 value (no assignment)
         end
     end
 endmodule

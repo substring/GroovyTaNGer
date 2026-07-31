@@ -7,17 +7,19 @@ module groovy_blit_rx_tb;
     reg  [31:0] bytes_len;
     reg  [2:0]  bytespp;
     reg  [7:0]  in_data;
-    wire        blitting, frame_done;
+    wire        blitting, frame_done, timed_out;
     wire [31:0] bytes_recv;
     wire        wr_en;
     wire [16:0] wr_addr;
     wire [15:0] wr_data;
-    integer     errors=0, nwr=0, done_cnt=0;
+    integer     errors=0, nwr=0, done_cnt=0, to_cnt=0;
 
-    groovy_blit_rx #(.ADDR_W(17)) dut (
+    // small TIMEOUT_CYCLES so the timeout test doesn't need thousands of cycles
+    groovy_blit_rx #(.ADDR_W(17), .TIMEOUT_CYCLES(20)) dut (
         .clk(clk), .rst(rst), .start(start), .bytes_len(bytes_len), .bytespp(bytespp),
         .in_valid(in_valid), .in_data(in_data),
         .blitting(blitting), .frame_done(frame_done), .bytes_recv(bytes_recv),
+        .timed_out(timed_out),
         .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data));
 
     // capture writes
@@ -26,6 +28,7 @@ module groovy_blit_rx_tb;
     always @(posedge clk) begin
         if (wr_en) begin mem[wr_addr]<=wr_data; last_addr<=wr_addr; nwr<=nwr+1; end
         if (frame_done) done_cnt<=done_cnt+1;
+        if (timed_out) to_cnt<=to_cnt+1;
     end
 
     task feed; input [7:0] d; begin
@@ -67,6 +70,37 @@ module groovy_blit_rx_tb;
         if (nwr !== 2)         begin $display("FAIL: 2nd blit writes=%0d exp 2", nwr); errors=errors+1; end
         if (mem[0]!==16'h2211) begin $display("FAIL: 2nd px0=%04h exp 2211", mem[0]); errors=errors+1; end
         if (done_cnt !== 1)    begin $display("FAIL: 2nd frame_done=%0d exp 1", done_cnt); errors=errors+1; end
+
+        // --- TIMEOUT (root-cause fix): start a big blit, feed a few bytes, then a
+        // datagram is "lost" - go silent. blitting must NOT stay stuck forever; after
+        // TIMEOUT_CYCLES of no byte, it must abort (blitting->0, timed_out pulses), so a
+        // fresh CMD_BLIT can start cleanly. This is the exact bug from memory
+        // udp-rx-bottleneck: one lost UDP pixel datagram used to wedge blit_rx for good.
+        bytes_len=1000; bytespp=3'd2; nwr=0; done_cnt=0; to_cnt=0;
+        @(negedge clk); start=1; @(negedge clk); start=0;
+        feed(8'hAA); feed(8'hBB);                 // a couple bytes land...
+        if (!blitting) begin $display("FAIL: dropped blitting too early"); errors=errors+1; end
+        // ...then the datagram carrying the rest is LOST: go silent past TIMEOUT_CYCLES.
+        repeat(25) @(negedge clk);
+        if (blitting)  begin $display("FAIL: blitting still stuck after timeout window"); errors=errors+1; end
+        if (to_cnt !== 1) begin $display("FAIL: timed_out pulses=%0d exp 1", to_cnt); errors=errors+1; end
+        // the parser can now route a FRESH header again - prove start works right after.
+        bytes_len=4; bytespp=3'd2; nwr=0; done_cnt=0;
+        @(negedge clk); start=1; @(negedge clk); start=0;
+        feed(8'h11); feed(8'h22); feed(8'h33); feed(8'h44);
+        @(negedge clk); @(negedge clk);
+        if (nwr !== 2)      begin $display("FAIL: post-timeout blit writes=%0d exp 2", nwr); errors=errors+1; end
+        if (done_cnt !== 1) begin $display("FAIL: post-timeout frame_done=%0d exp 1", done_cnt); errors=errors+1; end
+
+        // a byte arriving WITHIN the timeout window must reset the watchdog (no timeout).
+        bytes_len=1000; bytespp=3'd2; nwr=0; done_cnt=0; to_cnt=0;
+        @(negedge clk); start=1; @(negedge clk); start=0;
+        feed(8'hAA);
+        repeat(10) @(negedge clk);                // < TIMEOUT_CYCLES, still silent
+        feed(8'hBB);                               // byte arrives just in time -> reset idle_cnt
+        repeat(10) @(negedge clk);                 // another < TIMEOUT_CYCLES gap
+        if (!blitting)     begin $display("FAIL: false timeout despite in-window byte"); errors=errors+1; end
+        if (to_cnt !== 0)  begin $display("FAIL: spurious timeout pulses=%0d exp 0", to_cnt); errors=errors+1; end
 
         if (errors==0) $display("PASS: groovy_blit_rx_tb");
         else begin $display("FAIL: groovy_blit_rx_tb (%0d errors)", errors); $fatal(1); end

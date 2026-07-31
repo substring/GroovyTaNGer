@@ -75,6 +75,7 @@ module gwline_top (
     logic [31:0] tx_ip;   logic [15:0] tx_src_port, tx_dst_port;
     logic [7:0]  tx_data; logic        tx_data_av, tx_req;
     logic        tx_req_rdy, tx_data_rdy;
+    logic        rx_reject;   // pulses when udp.sv's OWN internal FIFO was full (2026-07-19)
 
     udp #(
         .ip_adr ({8'd192, 8'd168, 8'd15, 8'd14}),
@@ -89,7 +90,8 @@ module gwline_top (
         .rx_data_rdy_i(1'b1),        .rx_data_av_o(rx_data_av), .rx_data_o(rx_data),
         .tx_ip_i(tx_ip), .tx_src_port_i(tx_src_port), .tx_dst_port_i(tx_dst_port),
         .tx_req_i(tx_req), .tx_data_i(tx_data), .tx_data_av_i(tx_data_av),
-        .tx_req_rdy_o(tx_req_rdy), .tx_data_rdy_o(tx_data_rdy)
+        .tx_req_rdy_o(tx_req_rdy), .tx_data_rdy_o(tx_data_rdy),
+        .rx_reject_o(rx_reject)
     );
 
     logic [31:0] req_ip;  logic [15:0] req_port;  logic [2:0] hstate;
@@ -213,6 +215,17 @@ module gwline_top (
         .tx_req_rdy(tx_req_rdy), .tx_data_rdy(tx_data_rdy)
     );
 
+    // VIDEO RESET (2026-07-19): CMD_INIT (init_valid, already sent at the start of every
+    // test session) now also resets the ring writer + upstream FIFO + slot_line ground
+    // truth. Without this, groovy_lineram's actual BRAM content (and slot_line) persisted
+    // across tests - a new test could inherit stale pixels from a PREVIOUS test, making it
+    // impossible to tell "this test's send is broken" from "this is leftover content from
+    // before" (exactly the ambiguity hit while debugging sf2.png/hbars this session). This
+    // does NOT clear the ring's actual BRAM cells (no bulk-write path for that yet) but
+    // DOES reset slot_line to the FFFF sentinel, so SL=FFFF unambiguously means "not
+    // rewritten since the last CMD_INIT" even if the physical BRAM cell still has old data.
+    wire video_rst = core_rst | init_valid;
+
     // ---- BLIT pixel accumulator (clk50m) ----
     wire                  fb_we, frame_done;
     wire [FB_ADDR_W-1:0]  fb_waddr;   // (unused for the ring; kept for the port)
@@ -221,26 +234,42 @@ module gwline_top (
     // to blit_rx's byte-count compare instead of a fresh multiply on the clk50m path.
     logic [31:0]          bytes_len;
     always_ff @(posedge clk50m) bytes_len <= NATIVE_PIX * cfg_bpp;
-    groovy_blit_rx #(.ADDR_W(FB_ADDR_W)) u_blit (
+    wire blit_timed_out;
+    // TIMEOUT_CYCLES = 8ms @ 50MHz. The default (1ms) was too tight: a plain sleep()-paced
+    // test sender's OWN scheduler jitter occasionally exceeded 1ms between lines, which
+    // made the FPGA's OWN watchdog fire on jitter, not a real loss. 8ms stays well under
+    // one video frame (16.7ms - a real stall should resolve within a frame) while giving
+    // generous headroom over normal OS/network gaps.
+    groovy_blit_rx #(.ADDR_W(FB_ADDR_W), .TIMEOUT_CYCLES(400_000)) u_blit (
         .clk(clk50m), .rst(core_rst),
         .start(blit_valid), .bytes_len(bytes_len), .bytespp(cfg_bpp),
         .in_valid(p_valid & blitting), .in_data(p_data),
         .blitting(blitting), .frame_done(frame_done), .bytes_recv(),
+        .timed_out(blit_timed_out),
         .wr_en(fb_we), .wr_addr(fb_waddr), .wr_data(fb_wdata));
 
     // ---- ELASTIC FIFO: blit_rx (net speed, no back-pressure) -> ring mapper --------
     // blit_rx emits pixels as fast as UDP delivers them; the ring mapper can only place
     // a pixel when the lap-guard allows (paced by the raster). This FIFO absorbs the
     // burst so a lap-stall HOLDS pixels instead of dropping them. Both sides are clk50m
-    // -> synchronous FIFO (no CDC). Depth 2^9 = 512 pixels (~1.6 native lines) of slack
-    // to absorb open-loop send-rate jitter now that the reader can't lap the writer.
+    // -> synchronous FIFO (no CDC). Depth 2^12 = 4096 pixels (~12.8 native lines):
+    // ADDR_W=9 (512 px, ~1.6 line) was FAR too shallow - a real lap-guard stall (writer
+    // waiting for the reader to advance) drained it in a fraction of a line, so nearly
+    // EVERY line overflowed (HW: OV saturated immediately on hbars). groovy_lineram_wr's
+    // fifo_overflow port (2026-07-18 fix) stops a dropped pixel from wedging write_line
+    // forever, but a pixel that's dropped still isn't the RIGHT pixel in the ring - if
+    // most lines drop pixels, most of the ring is stale/wrong data, not really fixed.
+    // 4096 gives enough margin to absorb a realistic stall without dropping at all in
+    // the tested send rates, so overflow (and the recovery path) becomes the rare
+    // fallback it was meant to be, not the common case.
     wire        fifo_full, fifo_empty, fifo_overflow, mapper_pop;
     wire [15:0] fifo_head;
-    groovy_sync_fifo #(.DATA_W(16), .ADDR_W(9)) u_wr_fifo (
-        .clk(clk50m), .rst(core_rst),
+    wire [12:0] fifo_level;   // ADDR_W+1 = 13 bits (0..4096)
+    groovy_sync_fifo #(.DATA_W(16), .ADDR_W(12)) u_wr_fifo (
+        .clk(clk50m), .rst(video_rst),
         .wr_en(fb_we), .wr_data(fb_wdata), .full(fifo_full),
         .rd_en(mapper_pop), .rd_data(fifo_head), .empty(fifo_empty),
-        .overflow(fifo_overflow));
+        .overflow(fifo_overflow), .fifo_level(fifo_level));
 
     // =========================================================================
     // PIXEL CLOCK (720p) - the only PLL now (no DDR3 clocks)
@@ -257,27 +286,33 @@ module gwline_top (
     // CDC read_line into clk50m for the ring lap-guard; write_line into pix_clk for
     // the reader release. frame_start = blit_valid resets both progress counters.
     // =========================================================================
-    wire [15:0] scan_srcline;                 // pix_clk: current source line scanned
+    wire [15:0] scan_srcline;                 // pix_clk: TRUE raster line (for the ACK)
+    wire [15:0] scan_readguard;               // pix_clk: CLAMPED read line (for the guard)
     logic       have_frame;                   // pix_clk (defined below); CDC'd here
     logic [1:0] hf_50;  logic [15:0] read_line_50;
-    // SYNC/FILL: until have_frame, the reader is NOT genuinely consuming lines (its
-    // scan_srcline just tracks the free-running raster). Feeding that garbage to the
-    // writer's lap-guard falsely stalls the fill. So HOLD read_line at 0 until
-    // have_frame -> the writer primes the ring freely; once scanout is live it tracks
-    // the real read line. (This is the SYNC/FILL -> STREAM handoff.)
+    // The writer's overwrite guard uses the CLAMPED read line (read<=write) - NOT the free
+    // raster, which sprints ahead and makes the guard stall by fits (FIFO overflow). Held
+    // at 0 until have_frame so the writer primes the ring freely (SYNC/FILL -> STREAM).
     always_ff @(posedge clk50m) begin
         hf_50 <= {hf_50[0], have_frame};
-        read_line_50 <= hf_50[1] ? scan_srcline : 16'd0;
+        read_line_50 <= hf_50[1] ? scan_readguard : 16'd0;
     end
 
     wire        rw_we;  wire [LNSEL_W-1:0] rw_slot;  wire [COL_W-1:0] rw_col;
     wire [15:0] rw_data;  wire [15:0] write_line;  wire rw_stall;
-    groovy_lineram_wr #(.NLINES(NLINES), .LNSEL_W(LNSEL_W), .COL_W(COL_W), .DATA_W(16)) u_lrw (
-        .clk(clk50m), .rst(core_rst), .frame_start(blit_valid),
+    wire        sl_we;  wire [LNSEL_W-1:0] sl_slot;  wire [15:0] sl_line;
+    wire [LNSEL_W-1:0] target_slot_at_write;  wire [12:0] fifo_level_at_write;
+    groovy_lineram_wr #(.NLINES(NLINES), .LNSEL_W(LNSEL_W), .COL_W(COL_W), .DATA_W(16),
+                        .MARGIN(MARGIN), .ADDR_W_FIFO(12)) u_lrw (
+        .clk(clk50m), .rst(video_rst), .frame_start(blit_valid),
         .in_valid(~fifo_empty), .in_data(fifo_head), .pop(mapper_pop), .native_w(SRC_W),
-        .read_line(read_line_50),
+        .fifo_overflow(fifo_overflow), .fifo_level(fifo_level),
+        .read_line(read_line_50), .guard_en(hf_50[1]),
         .we(rw_we), .w_slot(rw_slot), .w_col(rw_col), .w_data(rw_data),
-        .write_line(write_line), .stall(rw_stall));
+        .write_line(write_line), .stall(rw_stall),
+        .sl_we(sl_we), .sl_slot(sl_slot), .sl_line(sl_line),
+        .target_slot_at_write(target_slot_at_write),
+        .fifo_level_at_write(fifo_level_at_write));
 
     // ---- the line ring (dual-port BRAM) ----
     wire [LNSEL_W-1:0] r_slot;  wire [COL_W-1:0] r_col;  wire [15:0] r_data;
@@ -285,6 +320,21 @@ module gwline_top (
                      .LNSEL_W(LNSEL_W), .COL_W(COL_W)) u_ring (
         .wr_clk(clk50m), .we(rw_we), .w_slot(rw_slot), .w_col(rw_col), .w_data(rw_data),
         .rd_clk(pix_clk), .r_slot(r_slot), .r_col(r_col), .r_data(r_data));
+
+    // DIAGNOSTIC + CORRECTNESS (2026-07-19): per-slot ground truth ring, same dual-port
+    // shape as u_ring above (write clk50m, read pix_clk, no CDC synchronizer needed).
+    // groovy_lineram_wr's fifo_overflow recovery advances write_line even for a DROPPED
+    // pixel, so write_line reaching SRC_H no longer proves the ring's physical content
+    // is fresh - a slot that missed its rewrite this lap still holds an OLDER source
+    // line (line - k*NLINES). This lets groovy_lineram_scan compare what a slot ACTUALLY
+    // holds against what it's about to display and reject (freeze) a stale slot instead
+    // of showing it as if it were correct - reproduced on HW: sf2.png showed a mid-frame
+    // block of lines repeating from the very START of display (SL != RL, off by an exact
+    // multiple of NLINES - confirmed via the UART SL= field before this fix existed).
+    wire [15:0] slot_actual_line;
+    groovy_slotline_ram #(.NLINES(NLINES), .LNSEL_W(LNSEL_W)) u_slotline (
+        .wr_clk(clk50m), .we(sl_we), .w_slot(sl_slot), .w_line(sl_line),
+        .rd_clk(pix_clk), .r_slot(r_slot), .r_line(slot_actual_line));
 
     // =========================================================================
     // 720p timing
@@ -304,11 +354,94 @@ module gwline_top (
     // (write_line CDC'd to pix_clk.) Sticky per session; re-armed by the ring guards.
     logic [15:0] wline_px;
     always_ff @(posedge pix_clk) wline_px <= write_line;
-    // have_frame declared up top (for the write-side lap-guard CDC). SYNC/FILL: set it
-    // once the writer has primed MARGIN lines. Sticky per session.
+
+    // DIAGNOSTIC (2026-07-19): the VIDEO raster loops at a fixed 60Hz (frame_start,
+    // vcount==0) totally independent of the network - count these loops (toggle+CDC to
+    // clk50m, same pattern as blit_valid/init_valid above) and compare to RD (network
+    // frame_done count). If VF climbs much faster than RD, the video raster is looping
+    // (and re-arming disp_line via net_frame_start/its own frame_start) many times per
+    // SINGLE network frame's write - exactly the mismatch that would explain the ring
+    // lap-guard staying saturated (ST=FFFF) even though the nominal send rate matches
+    // the raster's nominal per-line consumption rate on paper.
+    logic vframe_tgl;
+    always_ff @(posedge pix_clk or negedge hdmi_rst_n)
+        if (!hdmi_rst_n) vframe_tgl <= 1'b0;
+        else if (frame_start) vframe_tgl <= ~vframe_tgl;
+    logic [2:0] vframe_tgl_50;
+    always_ff @(posedge clk50m) vframe_tgl_50 <= {vframe_tgl_50[1:0], vframe_tgl};
+    wire vframe_pulse_50 = vframe_tgl_50[2] ^ vframe_tgl_50[1];
+    logic [15:0] vframe_cnt;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) vframe_cnt <= 16'd0;
+        else if (vframe_pulse_50 && vframe_cnt != 16'hFFFF) vframe_cnt <= vframe_cnt + 16'd1;
+
+    // rx_reject is already clk50m (same domain as udp_inst) - no CDC needed.
+    logic [15:0] rj_cnt;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) rj_cnt <= 16'd0;
+        else if (rx_reject && rj_cnt != 16'hFFFF) rj_cnt <= rj_cnt + 16'd1;
+
+    // CDC blit_valid (clk50m, a new NETWORK frame) into pix_clk as a 1-cycle pulse.
+    // The writer's frame_start IS blit_valid - it resets line/write_line to 0 the
+    // instant a new BLIT header arrives, with NO regard for where the video raster
+    // currently is. Without this, groovy_lineram_scan only reset disp_line on ITS OWN
+    // frame_start (vcount==0, a free-running ~60Hz event with no phase relationship to
+    // the network), so a new source frame could start writing at line 0 while disp_line
+    // was still latched near the END of the previous frame - the writer then chases
+    // read_line (CDC'd from the stale disp_line) up by NLINES and hits the lap-guard,
+    // stalling write_line partway through EVERY frame after the first (reproduced on HW
+    // with hbars: WL froze at the same ~159/240 on frame 2+, RD stuck at 1, independent
+    // of the sender's pacing - see next-session-beamrace.md). Fix: let a new network
+    // frame also kick the reader's frame_start, so both sides realign to 0 together.
+    // blit_valid is a SINGLE-CYCLE clk50m strobe (~20ns); pix_clk (74.25MHz, ~13.5ns, no
+    // phase relationship to clk50m) risks sampling right past a plain pulse - toggle it
+    // instead (a LEVEL change, not an edge) so any pix_clk sample is guaranteed to catch
+    // it eventually, then edge-detect the synchronized toggle for a clean 1-cycle pulse.
+    logic blit_valid_tgl;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) blit_valid_tgl <= 1'b0;
+        else if (blit_valid) blit_valid_tgl <= ~blit_valid_tgl;
+    logic [2:0] blit_valid_tgl_px;
+    always_ff @(posedge pix_clk) blit_valid_tgl_px <= {blit_valid_tgl_px[1:0], blit_valid_tgl};
+    wire net_frame_start = blit_valid_tgl_px[2] ^ blit_valid_tgl_px[1];
+
+    // CDC init_valid (clk50m, CMD_INIT = "new test session") into pix_clk, same
+    // toggle+sync technique as blit_valid above (single-cycle strobe, no phase relation
+    // to pix_clk). Drives have_frame back to 0 so a new test can't inherit "sticky"
+    // scanout release from a PREVIOUS test's fill level (2026-07-19: without this,
+    // have_frame stayed 1 across tests, masking whether a fresh test really re-filled
+    // the ring or was showing leftover content from before).
+    logic init_valid_tgl;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) init_valid_tgl <= 1'b0;
+        else if (init_valid) init_valid_tgl <= ~init_valid_tgl;
+    logic [2:0] init_valid_tgl_px;
+    always_ff @(posedge pix_clk) init_valid_tgl_px <= {init_valid_tgl_px[1:0], init_valid_tgl};
+    wire video_reset_px = init_valid_tgl_px[2] ^ init_valid_tgl_px[1];
+
+    // SYNC/FILL two-stage gate (2026-07-19 fix): "writer has primed MARGIN lines" alone
+    // is NOT enough to release scanout. The video raster (frame_start = vcount==0) is a
+    // FREE-RUNNING clock that never stops, so wline_px reaching MARGIN can happen at ANY
+    // phase of the raster's own cycle - releasing have_frame immediately let disp_line
+    // pick up the raster's CURRENT (arbitrary) position instead of starting from 0 (the
+    // scan's own reset only forces disp_line<=0 for ONE cycle; the very next cycle it
+    // free-runs to wherever sline_raster already is). Confirmed in sim
+    // (groovy_lineram_realscale_tb): write_line=16/read_line=15 at release - a gap of 1,
+    // not the intended MARGIN=16 - because the raster had already been running for a
+    // while when the fill threshold happened to be crossed. Fix: wait for primed (the
+    // fill threshold) AND the next real frame_start pulse after it, so disp_line's own
+    // reset-driven 0 (which happens exactly at frame_start, see groovy_lineram_scan.v)
+    // is what the writer actually sees as read_line's starting point.
+    logic primed;
+    always_ff @(posedge pix_clk or negedge hdmi_rst_n)
+        if (!hdmi_rst_n) primed <= 1'b0;
+        else if (video_reset_px) primed <= 1'b0;
+        else if (wline_px >= MARGIN[15:0]) primed <= 1'b1;
+
     always_ff @(posedge pix_clk or negedge hdmi_rst_n)
         if (!hdmi_rst_n) have_frame <= 1'b0;
-        else if (wline_px >= MARGIN[15:0]) have_frame <= 1'b1;
+        else if (video_reset_px) have_frame <= 1'b0;
+        else if (primed && frame_start) have_frame <= 1'b1;
 
     // reader active only after fill; else output black (avoids showing empty ring)
     wire scan_en = have_frame;
@@ -322,14 +455,21 @@ module gwline_top (
                           .V_REPL(VREP), .SRC_H(SRC_H)) u_scan (
         .pix_clk(pix_clk), .pix_rst(~hdmi_rst_n | ~scan_en),
         .hcount(hcount), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
-        .frame_start(frame_start),                 // raster top-of-frame -> monotonic index
+        .frame_start(frame_start | net_frame_start), // raster top-of-frame OR new net frame
         .max_line(wline_px),                       // clamp read <= write (underrun guard)
         .r_slot(r_slot), .r_col(r_col), .r_data(r_data),
+        .slot_actual_line(slot_actual_line),
         .pix_rgb565(pix565), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o),
-        .src_line(scan_srcline));
+        .src_line(scan_srcline), .read_guard(scan_readguard));
 
     // real vCount ACK: the scanout source line into clk50m (beam-race feedback).
     always_ff @(posedge clk50m) vcount_50 <= scan_srcline;
+
+    // CDC slot_actual_line -> clk50m for the UART SL= field (status only, no timing
+    // pressure - a plain register sync is enough for a slow-changing display value,
+    // same style as wline_px/vcount_50 above).
+    logic [15:0] slot_actual_line_50;
+    always_ff @(posedge clk50m) slot_actual_line_50 <= slot_actual_line;
 
     // underrun: read line reached the write line (host fell behind). STATUS ONLY, so
     // it does not need to be fast/combinational - PIPELINE the 16-bit compare (it was
@@ -350,6 +490,28 @@ module gwline_top (
     always_ff @(posedge clk50m) ur_s <= {ur_s[0], ur};
     assign beamrace_status = {7'd0, ur_s[1]};
 
+    // DIAGNOSTIC (2026-07-19): how often is the writer actually held off by the ring
+    // lap-guard (rw_stall) vs how often is the FIFO full/empty? sf2.png on real HW showed
+    // slot_actual_line wildly diverging from read_line (e.g. RL=5 SL=229) even though the
+    // exact same nominal send rate produced ZERO overflow in RTL simulation - this narrows
+    // down WHERE the real-vs-simulated gap is: if rw_stall is asserted a large fraction of
+    // the time, the reader (raster) is genuinely running far ahead of a real writer that
+    // can't keep up (a true throughput problem, not a logic bug); if it's rarely asserted,
+    // the FIFO is instead absorbing bursts and still overflowing (a burstiness problem).
+    // Gate on ~fifo_empty: stall only means something while the writer actually HAS a
+    // pixel waiting to place. Without this gate, ST/FF kept counting through the idle
+    // gap after write_line reached SRC_H (writer at rest, waiting for the next frame),
+    // saturating both counters regardless of whether the frame's ACTIVE portion ever
+    // really stalled - useless for telling a real throughput problem from a healthy one.
+    logic [15:0] stall_cnt, fifo_full_cnt;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) begin stall_cnt <= 16'd0; fifo_full_cnt <= 16'd0; end
+        else if (blit_valid) begin stall_cnt <= 16'd0; fifo_full_cnt <= 16'd0; end
+        else begin
+            if (rw_stall && ~fifo_empty && stall_cnt != 16'hFFFF) stall_cnt <= stall_cnt + 16'd1;
+            if (fifo_full && fifo_full_cnt != 16'hFFFF) fifo_full_cnt <= fifo_full_cnt + 16'd1;
+        end
+
     // =========================================================================
     // RGB565 -> RGB888 + DVI_TX
     // =========================================================================
@@ -365,10 +527,50 @@ module gwline_top (
     // =========================================================================
     // UART debug (clk domain): RD=frames WL=write_line GP=write-read_gap RL=read_line
     //   HF=have_frame UR=underrun OV=fifo_overflow_count(/frame) SE=rx_seen
+    //   TO=blit_rx timeout count (cumulative, proves the UDP-loss watchdog is firing)
+    //   TL=tmds_lock (1=HDMI PLL locked; if 0, no video will ever show regardless of RD/WL)
+    //   WO=write_line at the FIRST fifo overflow this frame (FFFF=none yet this frame)
+    //   SL=ground truth: source line the CURRENTLY-CLAMPED ring slot actually holds
+    //     (compare to RL - if SL != RL, that slot is STALE, never really rewritten this
+    //     frame; FFFF = never written since the last CMD_INIT video reset)
+    //   ST=cycles/frame the writer was held by the RING LAP-GUARD while it had a pixel
+    //     waiting (rw_stall && ~fifo_empty)
+    //   FF=cycles/frame the upstream FIFO (blit_rx->mapper) was FULL - both cleared on
+    //     each new blit_valid; distinguishes a real writer-can't-keep-up throughput
+    //     problem (ST high) from FIFO absorbing bursts that still overflow (FF high,
+    //     ST low) - added 2026-07-19 to explain why sf2.png showed SL wildly diverging
+    //     from RL on real HW despite zero overflow at the same nominal rate in sim.
+    //   VF=cumulative count of VIDEO raster loops (frame_start, 60Hz, independent of the
+    //     network) - compare to RD (network frame_done count): if VF climbs much faster
+    //     than RD, the reader is looping many times per single (slower) network frame,
+    //     re-arming disp_line/read_line repeatedly while the writer is still mid-frame -
+    //     a real rate mismatch between the fixed-60Hz reader and the variable-latency
+    //     network writer, not a throughput/logic bug in the ring itself.
+    //   RJ=cumulative count of udp.sv's OWN internal FIFO-full rejects (rx_reject_o, a
+    //     Groovy_Tang diagnostic add to the vendored udp.sv core) - a frame silently
+    //     dropped INSIDE the UDP stack because ITS internal 8KB data FIFO / 32-entry
+    //     head FIFO was still full from a slow downstream consumer, indistinguishable
+    //     from real wire packet loss via TO= alone. If RJ climbs, the bottleneck is our
+    //     own consumption rate backing up into the vendor stack, not the network.
+    //   FL=upstream FIFO fill level (words) AT THE MOMENT of the most recent write
+    //     decision (real write or a dropped-pixel recovery) - from
+    //     groovy_lineram_wr.v's 2026-07-20 rewrite; shows how close to full the
+    //     4096-word elastic buffer was right when that decision happened, not just
+    //     after the fact via full/empty edges.
+    //   TS=ring slot that write decision targeted (line mod NLINES) - paired with FL
+    //     to see WHICH slot was being written when the buffer was nearly full.
     // =========================================================================
     logic [15:0] frame_cnt;
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) frame_cnt <= 16'd0; else if (frame_done) frame_cnt <= frame_cnt + 16'd1;
+
+    // TO: cumulative count of blit_rx timeouts (a lost-datagram frame was aborted+re-armed
+    // instead of wedging forever). Never cleared (except reset) - it's a lifetime counter,
+    // the proof the watchdog is doing its job.
+    logic [15:0] to_cnt;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) to_cnt <= 16'd0;
+        else if (blit_timed_out && to_cnt != 16'hFFFF) to_cnt <= to_cnt + 16'd1;
 
     // GP = the write-read GAP (write_line - read_line_50), the beam-race health metric:
     // under monotonic counters WL/RL climb+wrap so their raw values are useless, but the
@@ -385,17 +587,38 @@ module gwline_top (
         else if (blit_valid) ov_cnt <= 4'd0;
         else if (fifo_overflow && ov_cnt != 4'hF) ov_cnt <= ov_cnt + 4'd1;
 
-    reg [15:0] q_fc, q_wl, q_rl, q_gp; reg q_hf, q_ur, q_se; reg [3:0] q_ov;
+    // WO = write_line at the FIRST fifo_overflow this frame (0xFFFF = none yet this
+    // frame). Diagnostic (2026-07-18): OV alone proves overflows happen, but not WHEN
+    // in the frame - WO pinpoints whether they cluster at the very start (initial
+    // ring-fill racing the lap-guard before the reader has really got going) or spread
+    // evenly (a genuine sustained send-rate mismatch).
+    logic [15:0] wo_line;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) wo_line <= 16'hFFFF;
+        else if (blit_valid) wo_line <= 16'hFFFF;
+        else if (fifo_overflow && wo_line == 16'hFFFF) wo_line <= write_line;
+
+    // tmds_lock lives in the serial_clk domain; a 2-flop sync into `clk` is enough for a
+    // slow status bit read by the UART. Exposed as TL= so we can tell "no HDMI lock"
+    // apart from "locked but nothing displayed" without decoding the scrambled Dock LEDs.
+    reg [1:0] tmds_lock_sync;
+    always @(posedge clk) tmds_lock_sync <= {tmds_lock_sync[0], tmds_lock};
+
+    reg [15:0] q_fc, q_wl, q_rl, q_gp, q_to, q_wo, q_sl, q_st, q_ff, q_vf, q_rj; reg q_hf, q_ur, q_se, q_tl; reg [3:0] q_ov;
+    reg [15:0] q_fl; reg [15:0] q_ts;
     always @(posedge clk) begin
         q_fc<=frame_cnt; q_wl<=write_line; q_rl<=read_line_50; q_gp<=gp;
-        q_hf<=have_frame; q_ur<=ur_s[1]; q_ov<=ov_cnt; q_se<=rx_seen;
+        q_hf<=have_frame; q_ur<=ur_s[1]; q_ov<=ov_cnt; q_se<=rx_seen; q_to<=to_cnt;
+        q_tl<=tmds_lock_sync[1]; q_wo<=wo_line; q_sl<=slot_actual_line_50;
+        q_st<=stall_cnt; q_ff<=fifo_full_cnt; q_vf<=vframe_cnt; q_rj<=rj_cnt;
+        q_fl<={3'b0,fifo_level_at_write}; q_ts<={{(16-LNSEL_W){1'b0}},target_slot_at_write};
     end
 
     wire [7:0] tx_din; wire tx_wr, tx_busy;
     uart_tx_V2 #(.clk_freq(27_000_000), .uart_freq(115200)) u_dbgtx (
         .clk(clk), .din(tx_din), .wr_en(tx_wr), .tx_busy(tx_busy), .tx_p(uart_txp));
     function [7:0] hxd; input [3:0] n; hxd = (n<4'd10)?(8'h30+n):(8'h41+n-4'd10); endfunction
-    localparam [7:0] DBGLEN = 8'd60;
+    localparam [7:0] DBGLEN = 8'd148;
     reg [7:0] di=0, dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0; reg [7:0] dlb;
     always @(*) begin
         case (di)
@@ -410,8 +633,27 @@ module gwline_top (
             32:dlb="H";33:dlb="F";34:dlb="=";35:dlb=hxd({3'b0,q_hf});36:dlb=" ";
             37:dlb="U";38:dlb="R";39:dlb="=";40:dlb=hxd({3'b0,q_ur});41:dlb=" ";
             42:dlb="O";43:dlb="V";44:dlb="=";45:dlb=hxd(q_ov);46:dlb=" ";
-            47:dlb="S";48:dlb="E";49:dlb="=";50:dlb=hxd({3'b0,q_se});
-            58:dlb=8'h0D;59:dlb=8'h0A;default:dlb=" ";
+            47:dlb="S";48:dlb="E";49:dlb="=";50:dlb=hxd({3'b0,q_se});51:dlb=" ";
+            52:dlb="T";53:dlb="O";54:dlb="=";
+            55:dlb=hxd(q_to[15:12]);56:dlb=hxd(q_to[11:8]);57:dlb=hxd(q_to[7:4]);58:dlb=hxd(q_to[3:0]);59:dlb=" ";
+            60:dlb="T";61:dlb="L";62:dlb="=";63:dlb=hxd({3'b0,q_tl});64:dlb=" ";
+            65:dlb="W";66:dlb="O";67:dlb="=";
+            68:dlb=hxd(q_wo[15:12]);69:dlb=hxd(q_wo[11:8]);70:dlb=hxd(q_wo[7:4]);71:dlb=hxd(q_wo[3:0]);72:dlb=" ";
+            73:dlb="S";74:dlb="L";75:dlb="=";
+            76:dlb=hxd(q_sl[15:12]);77:dlb=hxd(q_sl[11:8]);78:dlb=hxd(q_sl[7:4]);79:dlb=hxd(q_sl[3:0]);80:dlb=" ";
+            81:dlb="S";82:dlb="T";83:dlb="=";
+            84:dlb=hxd(q_st[15:12]);85:dlb=hxd(q_st[11:8]);86:dlb=hxd(q_st[7:4]);87:dlb=hxd(q_st[3:0]);88:dlb=" ";
+            89:dlb="F";90:dlb="F";91:dlb="=";
+            92:dlb=hxd(q_ff[15:12]);93:dlb=hxd(q_ff[11:8]);94:dlb=hxd(q_ff[7:4]);95:dlb=hxd(q_ff[3:0]);96:dlb=" ";
+            97:dlb="V";98:dlb="F";99:dlb="=";
+            100:dlb=hxd(q_vf[15:12]);101:dlb=hxd(q_vf[11:8]);102:dlb=hxd(q_vf[7:4]);103:dlb=hxd(q_vf[3:0]);104:dlb=" ";
+            105:dlb="R";106:dlb="J";107:dlb="=";
+            108:dlb=hxd(q_rj[15:12]);109:dlb=hxd(q_rj[11:8]);110:dlb=hxd(q_rj[7:4]);111:dlb=hxd(q_rj[3:0]);112:dlb=" ";
+            113:dlb="F";114:dlb="L";115:dlb="=";
+            116:dlb=hxd(q_fl[15:12]);117:dlb=hxd(q_fl[11:8]);118:dlb=hxd(q_fl[7:4]);119:dlb=hxd(q_fl[3:0]);120:dlb=" ";
+            121:dlb="T";122:dlb="S";123:dlb="=";
+            124:dlb=hxd(q_ts[15:12]);125:dlb=hxd(q_ts[11:8]);126:dlb=hxd(q_ts[7:4]);127:dlb=hxd(q_ts[3:0]);
+            146:dlb=8'h0D;147:dlb=8'h0A;default:dlb=" ";
         endcase
     end
     always @(posedge clk) begin

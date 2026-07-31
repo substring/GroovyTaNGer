@@ -251,6 +251,21 @@ def _pace_until(t_target, spin_win=0.0015):
         pass
 
 
+def _read_ack_vcount(sock, addr):
+    """Poll CMD_GET_STATUS and return the FPGA's live raster source line (vCount), or None
+    on timeout / bad reply. Only valid BETWEEN blits (while blitting, the FPGA eats every
+    datagram as pixel data and won't answer). This is the phase-lock feedback."""
+    try:
+        sock.sendto(struct.pack("<B", CMD_GET_STATUS), addr)
+        data, _ = sock.recvfrom(64)
+    except OSError:
+        return None
+    if len(data) != 13:
+        return None
+    _, _, _, vcount, _ = struct.unpack("<IHIHB", data)
+    return vcount
+
+
 def send_blitrace(sock, addr, args):
     # BEAM-RACE paced blit (OPEN-LOOP RATE MATCH). While blitting, the FPGA treats every
     # datagram as pixel DATA (blit framing) and cannot answer CMD_GET_STATUS mid-frame,
@@ -287,40 +302,88 @@ def send_blitrace(sock, addr, args):
     try: print(decode_reply(sock.recvfrom(64)[0]))
     except socket.timeout: print("(no INIT ack)")
 
-    # pacing: one source line consumed every line_period on average. BUSY-SPIN cadence
-    # (perf_counter, OS-timer-independent) is essential - sleep() drifts ~700 lines/s on
-    # Windows (PoC-proven). The cadence is CONTINUOUS across frames (t_next never resets),
-    # so a static image = a continuous stream of the same frame, writer & reader locked.
-    line_period = 1.0 / (args.refresh * h) if h else 0.0
+    # PACING with PHASE LOCK to the FPGA raster (loose loop, PC time-master).
+    # line_period = wall time per SOURCE line. frame_period = one video frame.
+    line_period  = 1.0 / (args.refresh * h) if h else 0.0
+    frame_period = 1.0 / args.refresh
     lpd    = max(1, args.group)                            # lines per datagram
-    period = line_period * lpd / max(args.linerate, 1e-6) # time between datagrams
-    print(f"pacing: line_period={line_period*1e6:.1f}us, {lpd} line(s)/dgram, "
-          f"period={period*1e6:.1f}us (linerate={args.linerate}, busy-spin)")
+    period = line_period * lpd                            # busy-spin cadence per datagram
+
+    # --- INITIAL LOCK: read the FPGA's current raster line, predict the next vsync ---
+    # The FPGA reports its live scan source line (0..h-1) in the ACK vCount. We poll it
+    # (only valid BETWEEN blits, so do it now before streaming), then compute t_vsync =
+    # the perf_counter instant the FPGA raster will next be at line 0.
+    def next_vsync():
+        v = _read_ack_vcount(sock, addr)
+        if v is None or v >= h:
+            return None
+        now = time.perf_counter()
+        # lines remaining until the raster wraps to 0
+        return now + (h - v) * line_period
+    t_vsync = None
+    for _ in range(20):
+        t_vsync = next_vsync()
+        if t_vsync is not None:
+            break
+    if t_vsync is None:
+        print("(no vCount lock, falling back to free-run pacing)")
+        t_vsync = time.perf_counter()
+    else:
+        print(f"phase lock: next FPGA vsync in {(t_vsync-time.perf_counter())*1e3:.2f}ms")
+    print(f"pacing: line_period={line_period*1e6:.1f}us {lpd} line/dgram, "
+          f"phase-locked to FPGA raster, resync {args.resync_hz}Hz")
 
     frames = args.frames
-    t_next = time.perf_counter()
+    resync_period = 1.0 / args.resync_hz if args.resync_hz > 0 else 1e18
+    next_resync = time.perf_counter() + resync_period
+    lead_t = args.lead * line_period                      # writer runs this far AHEAD
     for f in range(frames):
-        # HEADER GAP: leave a short gap before each frame's BLIT header so the FPGA sees
-        # `blitting` fall (end of previous frame's pixels) BEFORE the new header arrives.
-        # Without it, at full rate the next header telescopes the last pixels -> the parser
-        # (which only sees commands while !blitting) misses it -> the writer stalls after
-        # one frame. This is a stand-in for the vblank window (Step 2). Skip for frame 0.
-        if f > 0 and args.header_gap > 0:
-            _pace_until(t_next + args.header_gap)
-            t_next += args.header_gap
-        # vsync>0 = beam-race target; header per frame.
+        # each frame targets a vsync instant; advance t_vsync one frame at a time.
+        # The writer must LEAD the raster by `lead` lines (not be synchronous with it -
+        # synchronous = writer overwrites the line the reader is reading right now, so the
+        # reader only ever sees a tiny stale window = the ~17-line repeat we saw). So start
+        # streaming lead_t BEFORE the vsync: line 0 lands while the raster is still in the
+        # previous frame's blanking, and stays `lead` lines ahead throughout.
+        t_start = t_vsync - lead_t
+        # if t_start is already in the past (startup / after a resync jump), don't blast -
+        # snap the schedule forward to now so we keep the per-line cadence.
+        now = time.perf_counter()
+        if t_start < now:
+            t_start = now
+        _pace_until(t_start - args.header_gap)
         sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, f + 1, 0, args.vsync), addr)
+        # stream the h lines timed so line L lands ~lead lines before the raster reaches L.
+        t_line = t_start
         sent = 0
         while sent < h:
             n = min(lpd, h - sent)
             off = sent * line_bytes
-            sock.sendto(frame[off:off + n * line_bytes], addr)
+            try:
+                sock.sendto(frame[off:off + n * line_bytes], addr)
+            except OSError:
+                pass                                       # kernel TX buffer full; skip
             sent += n
-            t_next += period
-            _pace_until(t_next)                            # precise busy-spin cadence
-        if args.verbose:
-            print(f"frame {f+1}: streamed {h} lines")
-    print(f"blitrace: {frames} frame(s) {w}x{h}, busy-spin paced -> {addr[0]}:{addr[1]}")
+            t_line += period
+            _pace_until(t_line)
+        t_vsync += frame_period                           # next frame's vsync (predicted)
+
+        # --- LOOSE RESYNC (~resync_hz): re-read vCount between frames, correct t_vsync ---
+        # We're now in the inter-frame gap (blitting just fell). Poll the true raster line
+        # and nudge t_vsync toward it, absorbing the PC<->FPGA clock drift.
+        if time.perf_counter() >= next_resync:
+            nv = next_vsync()
+            if nv is not None:
+                # snap t_vsync to the nearest predicted vsync consistent with nv
+                k = round((nv - t_vsync) / frame_period)
+                corrected = nv - k * frame_period
+                drift_us = (corrected - t_vsync) * 1e6
+                t_vsync = corrected
+                if args.verbose:
+                    print(f"resync @f{f+1}: drift {drift_us:+.1f}us corrected")
+            next_resync = time.perf_counter() + resync_period
+        if args.verbose and f % 60 == 0:
+            print(f"frame {f+1}")
+    print(f"blitrace: {frames} frame(s) {w}x{h}, phase-locked -> {addr[0]}:{addr[1]}")
 
 
 def send_blitfile(sock, addr, args):
@@ -447,6 +510,9 @@ def main():
                     help="bars=vertical colour bars, hbars=horizontal (reveals ring persistence), gradient")
     br.add_argument("--header-gap", type=float, default=0.0005,
                     help="seconds of quiet before each frame's BLIT header (lets blitting fall)")
+    br.add_argument("--lead", type=int, default=20, help="lines the writer stays ahead of the raster (MARGIN)")
+    br.add_argument("--resync-hz", type=float, default=2.0,
+                    help="how often to re-read the FPGA vCount and correct phase drift (0=never)")
     br.add_argument("--frames", type=int, default=1)
     br.add_argument("--vsync", type=int, default=1, help=">0 = beam-race target line")
     br.add_argument("--refresh", type=float, default=60.0, help="refresh Hz (sets line cadence)")

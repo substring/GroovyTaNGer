@@ -34,7 +34,12 @@ module groovy_sync_fifo #(
     output wire [DATA_W-1:0]  rd_data,  // head word, valid while !empty
     output wire               empty,
 
-    output reg                overflow  // sticky: a wr_en was dropped because full
+    output reg                overflow, // sticky: a wr_en was dropped because full
+
+    // DIAGNOSTIC (2026-07-20): words currently held (0..DEPTH), for instrumenting the
+    // beam-race write path's ring-fill rewrite - lets the writer/top observe how full
+    // this buffer is BEFORE it fills, not just the full/empty edges.
+    output wire [ADDR_W:0]    fifo_level
 );
     localparam integer DEPTH = (1 << ADDR_W);
 
@@ -57,6 +62,16 @@ module groovy_sync_fifo #(
 
     assign rd_data = mem[rptr[ADDR_W-1:0]];
 
+    // level = words held = wptr - rptr (wrap-safe: both pointers share the same
+    // ADDR_W+1-bit range and the true distance never exceeds DEPTH, so plain unsigned
+    // subtraction is exact - same technique already used for the ring's read/write
+    // line comparisons elsewhere in this project).
+    assign fifo_level = wptr - rptr;
+
+    // overflow = a 1-CYCLE PULSE each time a write is dropped (FIFO full). NOT sticky:
+    // a sticky latch made the top's per-frame OV counter saturate forever after a single
+    // startup drop, so OV=F meant "ever dropped" not "dropping now" - useless. As a pulse,
+    // the top can count real drops per frame and distinguish a one-off from a flood.
     always @(posedge clk) begin
         if (rst) begin
             wptr <= {(ADDR_W+1){1'b0}};
@@ -66,7 +81,7 @@ module groovy_sync_fifo #(
             if (do_wr) mem[wptr[ADDR_W-1:0]] <= wr_data;
             wptr <= wptr_nxt;
             rptr <= rptr_nxt;
-            if (wr_en && full) overflow <= 1'b1;   // dropped a pixel
+            overflow <= (wr_en && full);           // pulse: 1 the cycle a pixel is dropped
         end
     end
 endmodule

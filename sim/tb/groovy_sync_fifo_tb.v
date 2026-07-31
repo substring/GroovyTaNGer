@@ -18,7 +18,7 @@ module groovy_sync_fifo_tb;
         .wr_en(wr_en),.wr_data(wr_data),.full(full),
         .rd_en(rd_en),.rd_data(rd_data),.empty(empty),.overflow(overflow));
 
-    integer i, errs=0;
+    integer i, errs=0, ovf_pulses=0;
     reg [15:0] got;
     initial begin
         @(negedge clk); rst=0; @(negedge clk);
@@ -37,15 +37,17 @@ module groovy_sync_fifo_tb;
         end
         if (!empty) begin $display("BAD not empty after drain"); errs=errs+1; end
 
-        // --- overflow: fill DEPTH, then push 4 more; overflow must latch, and the
-        //     retained words are the first DEPTH (later writes dropped) ---
+        // --- overflow: fill DEPTH, then push 4 more; overflow PULSES on each dropped
+        //     write (not sticky), and the retained words are the first DEPTH ---
         @(negedge clk);
+        ovf_pulses = 0;
         for (i=0;i<DEPTH+4;i=i+1) begin
             wr_data<=i; wr_en<=1; @(negedge clk);
+            if (overflow) ovf_pulses = ovf_pulses + 1;   // count drop pulses live
         end
         wr_en<=0; @(negedge clk);
-        if (!full)     begin $display("BAD not full after DEPTH writes"); errs=errs+1; end
-        if (!overflow) begin $display("BAD overflow not set"); errs=errs+1; end
+        if (!full)          begin $display("BAD not full after DEPTH writes"); errs=errs+1; end
+        if (ovf_pulses < 4) begin $display("BAD overflow pulses=%0d (want >=4)", ovf_pulses); errs=errs+1; end
         for (i=0;i<DEPTH;i=i+1) begin
             got = rd_data;
             if (got !== i[DATA_W-1:0]) begin
