@@ -98,7 +98,18 @@ module groovy_udpstress_top (
         end
     end
 
-    wire core_rst = ~ready;
+    // core_rst was ~ready alone, which never reasserts across a simple SRAM reflash
+    // (the PHY link/ready stays up independently of the FPGA config reload) - every
+    // measurement needed a full power cycle to get a guaranteed-clean counter state,
+    // burning enormous amounts of session time. OR in the physical reset button (rst,
+    // active-low, T10) so a single button press gives an instant, reliable counter
+    // reset with no reflash/power-cycle needed.
+    //
+    // 2026-08-01: ALSO added a network-triggered soft reset (soft_rst_pulse below) so
+    // an automated loss-rate sweep (many back-to-back measurements at different send
+    // rates) doesn't need a physical button press between every point - a special
+    // "reset command" datagram (seq == RESET_CMD_SEQ) does it over the wire instead.
+    wire core_rst = ~ready | ~rst | soft_rst_pulse;
 
     // ---- RX byte stream (raw, no parser) ----
     logic [7:0] sdat;  logic sv, psv;
@@ -139,6 +150,14 @@ module groovy_udpstress_top (
             end
         end
     end
+
+    // Network-triggered soft reset: a magic seq value (all-ones, never reached by a
+    // real test's incrementing counter) resets every counter over the wire, so an
+    // automated loss-rate sweep across many send rates doesn't need a physical S0
+    // press between every measurement point. Purely combinational (not registered on
+    // core_rst's own domain) to avoid feeding back into the reset it drives.
+    localparam [31:0] RESET_CMD_SEQ = 32'hFFFFFFFF;
+    wire soft_rst_pulse = seq_ready && (seq_acc == RESET_CMD_SEQ);
 
     logic [31:0] next_expected;
     logic [31:0] rx_cnt, gap_cnt, last_seq;
