@@ -66,7 +66,27 @@ module udp
     input logic tx_data_av_i,
 
     output logic tx_req_rdy_o,
-    output logic tx_data_rdy_o
+    output logic tx_data_rdy_o,
+
+    // Groovy_Tang DIAGNOSTIC ADD (2026-07-19, not part of the original Sipeed core):
+    // pulses 1 cycle whenever ethernet_resolve_status's own FIFO-full check (state 20,
+    // "如果fifo满了，就直接拒绝接收" = "if the fifo is full, reject reception directly")
+    // rejects an inbound frame because rx_head_fifo or rx_data_fifo didn't have room.
+    // This is a SILENT drop in the original core (no error signal existed) - added to
+    // let the application tell "network packet genuinely lost on the wire" apart from
+    // "packet arrived fine but this stack's own internal buffer was still full from a
+    // slow downstream consumer", which look identical from the app's blit_rx timeout
+    // alone. No other behavior of the core is changed.
+    output logic rx_reject_o,
+
+    // Groovy_Tang DIAGNOSTIC ADD (2026-07-20, not part of the original Sipeed core):
+    // live occupancy of the two internal RX FIFOs, in words - rx_reject_o only pulses
+    // when the near-full ADMISSION check trips (>=124/128 head slots or >=6592/8192
+    // data bytes used), so a design that never rejects can STILL be running much
+    // fuller than expected under sustained load without any visibility into it. These
+    // let the application watch the real occupancy trend during a stress run.
+    output logic [7:0]  rx_head_fifo_level_o,
+    output logic [12:0] rx_data_fifo_level_o
 );
 
 //logic [31:0] ip_adr = {8'd192,8'd168,8'd15,8'd16};
@@ -307,6 +327,13 @@ shortint rx_data_fifo_head;
 shortint rx_data_fifo_tail = 0;
 logic [7:0] rx_data_fifo[8191:0];
 
+// Groovy_Tang DIAGNOSTIC ADD (2026-07-20): live word-count occupancy of both RX
+// FIFOs, matching the same modular-distance math the admission check itself uses
+// (head_int - tail, wrapped), so occupancy trend is visible even when it never
+// crosses the reject threshold.
+assign rx_head_fifo_level_o = (rx_head_fifo_head_int - rx_head_fifo_tail + 128) % 128;
+assign rx_data_fifo_level_o = (rx_data_fifo_head_int - rx_data_fifo_tail + 8192) % 8192;
+
 logic [7:0] rx_data_fifo_i_port;
 logic rx_data_fifo_i_en;
 logic [12:0] rx_data_fifo_i_adr;
@@ -330,12 +357,14 @@ always_ff@(posedge clk50m or negedge phy_rdy)begin
         ethernet_resolve_status <= 0;
         rx_head_fifo_head <= 0;
         rx_head_fifo_head_int <= 0;
-        
+
         rx_data_fifo_head <= 0;
         rx_data_fifo_head_int <= 0;
 
         arp_list <= 2'b00;
+        rx_reject_o <= 1'b0;   // Groovy_Tang add
     end else begin
+        rx_reject_o <= 1'b0;   // Groovy_Tang add: default deassert, pulsed below
         if(arp_list[0]==1'b1)begin
             if(arp_life_time[0] != 0)
                 arp_life_time[0] <= arp_life_time[0] - 1;
@@ -405,10 +434,14 @@ always_ff@(posedge clk50m or negedge phy_rdy)begin
             20:begin
                 //如果fifo满了，就直接拒绝接收
                 //head 剩余空间小于4 或者 data 剩余空间小于1600
-                if((rx_data_fifo_tail + 127 - rx_data_fifo_head_int) % 128 < 4)
+                if((rx_data_fifo_tail + 127 - rx_data_fifo_head_int) % 128 < 4)begin
                     ethernet_resolve_status <= 100;
-                if((rx_data_fifo_tail + 8191 - rx_data_fifo_head_int) % 8192 < 1600)
+                    rx_reject_o <= 1'b1;   // Groovy_Tang add: head FIFO was too full
+                end
+                if((rx_data_fifo_tail + 8191 - rx_data_fifo_head_int) % 8192 < 1600)begin
                     ethernet_resolve_status <= 100;
+                    rx_reject_o <= 1'b1;   // Groovy_Tang add: data FIFO was too full
+                end
 
                 if(rx_data_byte_cnt == 20)begin
                     if(rx_info_buf[47:44]!=4'd4)begin
