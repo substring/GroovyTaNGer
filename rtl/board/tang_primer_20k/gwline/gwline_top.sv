@@ -55,7 +55,13 @@ module gwline_top (
     localparam integer LNSEL_W = 5;      // clog2(NLINES)
     localparam integer LINE_W  = 512;    // >= widest native line (320 here); param
     localparam integer COL_W   = 10;     // clog2(LINE_W)
-    localparam integer MARGIN  = 16;     // reader release: writer this many lines in (mid-ring)
+    localparam integer MARGIN  = 16;     // writer overwrite-guard window width (steady state)
+    // START_THRESHOLD: lines the writer must have queued before the video raster is
+    // allowed to start counting AT ALL (see raster_en below) - deliberately separate
+    // from MARGIN (the steady-state guard window) so shrinking the startup wait does
+    // NOT also shrink the ring's runtime overwrite protection. Kept equal to MARGIN
+    // for now (same "half-ring" comfort margin); can be tuned independently later.
+    localparam integer START_THRESHOLD = 16;
 
     // =========================================================================
     // NETWORK SIDE (clk50m) - identical to gwddr3net (proven eth RX)
@@ -289,13 +295,46 @@ module gwline_top (
     wire [15:0] scan_srcline;                 // pix_clk: TRUE raster line (for the ACK)
     wire [15:0] scan_readguard;               // pix_clk: CLAMPED read line (for the guard)
     logic       have_frame;                   // pix_clk (defined below); CDC'd here
+
+    // STARTUP FIX (2026-08-02 stabilization pass): the video raster used to run FREELY
+    // from power-up, completely decoupled from the network - so by the time the writer
+    // had queued enough lines to prime, the raster could be ANYWHERE in its own 60Hz
+    // cycle, and (write_line's own guard was OFF until have_frame) the writer kept
+    // filling unguarded for however long remained until the raster's next frame_start -
+    // up to a full 16.7ms video frame. Measured on a real udp.sv-driven testbench
+    // (sim/tb/gwline_ring_e2e_tb.v): the writer accumulated ~80 lines of lead (2.5x
+    // NLINES) before the guard ever engaged, saturating the upstream elastic FIFO and
+    // corrupting the START of the next network frame once guard_en finally kicked in.
+    // FIX: HOLD the raster itself at (hcount=0,vcount=0) - video_timing_gen's `en` port
+    // already supports this cleanly - until the writer has queued START_THRESHOLD
+    // lines, AND activate the writer's guard from that same moment (not only once
+    // have_frame later goes high). Two effects: (1) the writer can never accumulate
+    // more than the guard's own MARGIN before being throttled, even during startup;
+    // (2) the raster's first-ever frame_start, once released, is guaranteed to be a
+    // clean (0,0) start - no risk of the old "arbitrary raster phase" bug (see the
+    // ALTERNATIVE note below have_frame's assignment for the remaining, deliberately
+    // NOT taken, wrinkle this leaves).
+    logic [15:0] wline_px;
+    always_ff @(posedge pix_clk) wline_px <= write_line;
+
+    logic raster_en;
+    always_ff @(posedge pix_clk or negedge hdmi_rst_n)
+        if (!hdmi_rst_n) raster_en <= 1'b0;
+        else if (video_reset_px) raster_en <= 1'b0;
+        else if (wline_px >= START_THRESHOLD[15:0]) raster_en <= 1'b1;
+
     logic [1:0] hf_50;  logic [15:0] read_line_50;
     // The writer's overwrite guard uses the CLAMPED read line (read<=write) - NOT the free
     // raster, which sprints ahead and makes the guard stall by fits (FIFO overflow). Held
-    // at 0 until have_frame so the writer primes the ring freely (SYNC/FILL -> STREAM).
+    // at 0 until raster_en (not have_frame - see the startup-fix comment above: the guard
+    // must engage the moment the raster is allowed to start counting at all, not only
+    // once display has actually been released) so read_line=0 is used as an implicit
+    // "reader hasn't really moved yet" reference, capping the writer's lead at MARGIN.
+    logic [1:0] rasteren_50;
     always_ff @(posedge clk50m) begin
+        rasteren_50 <= {rasteren_50[0], raster_en};
         hf_50 <= {hf_50[0], have_frame};
-        read_line_50 <= hf_50[1] ? scan_readguard : 16'd0;
+        read_line_50 <= rasteren_50[1] ? scan_readguard : 16'd0;
     end
 
     wire        rw_we;  wire [LNSEL_W-1:0] rw_slot;  wire [COL_W-1:0] rw_col;
@@ -307,7 +346,7 @@ module gwline_top (
         .clk(clk50m), .rst(video_rst), .frame_start(blit_valid),
         .in_valid(~fifo_empty), .in_data(fifo_head), .pop(mapper_pop), .native_w(SRC_W),
         .fifo_overflow(fifo_overflow), .fifo_level(fifo_level),
-        .read_line(read_line_50), .guard_en(hf_50[1]),
+        .read_line(read_line_50), .guard_en(rasteren_50[1]),
         .we(rw_we), .w_slot(rw_slot), .w_col(rw_col), .w_data(rw_data),
         .write_line(write_line), .stall(rw_stall),
         .sl_we(sl_we), .sl_slot(sl_slot), .sl_line(sl_line),
@@ -342,18 +381,13 @@ module gwline_top (
     wire        de, hsync, vsync, line_start, frame_start;
     wire [15:0] hcount, vcount;
     video_timing_gen u_timing (
-        .clk(pix_clk), .rst(~hdmi_rst_n), .en(1'b1),
+        .clk(pix_clk), .rst(~hdmi_rst_n), .en(raster_en),
         .h_total(16'd1650), .h_active(OUT_W), .h_sync_begin(16'd1390), .h_sync_end(16'd1430),
         .v_total(16'd750),  .v_active(OUT_H), .v_sync_begin(16'd725),  .v_sync_end(16'd730),
         .h_sync_pos(1'b1), .v_sync_pos(1'b1),
         .hcount(hcount), .vcount(vcount),
         .hsync(hsync), .vsync(vsync), .de(de),
         .line_start(line_start), .frame_start(frame_start));
-
-    // have_frame: SYNC/FILL gate - release scanout once the writer is MARGIN lines in.
-    // (write_line CDC'd to pix_clk.) Sticky per session; re-armed by the ring guards.
-    logic [15:0] wline_px;
-    always_ff @(posedge pix_clk) wline_px <= write_line;
 
     // DIAGNOSTIC (2026-07-19): the VIDEO raster loops at a fixed 60Hz (frame_start,
     // vcount==0) totally independent of the network - count these loops (toggle+CDC to
@@ -419,29 +453,28 @@ module gwline_top (
     always_ff @(posedge pix_clk) init_valid_tgl_px <= {init_valid_tgl_px[1:0], init_valid_tgl};
     wire video_reset_px = init_valid_tgl_px[2] ^ init_valid_tgl_px[1];
 
-    // SYNC/FILL two-stage gate (2026-07-19 fix): "writer has primed MARGIN lines" alone
-    // is NOT enough to release scanout. The video raster (frame_start = vcount==0) is a
-    // FREE-RUNNING clock that never stops, so wline_px reaching MARGIN can happen at ANY
-    // phase of the raster's own cycle - releasing have_frame immediately let disp_line
-    // pick up the raster's CURRENT (arbitrary) position instead of starting from 0 (the
-    // scan's own reset only forces disp_line<=0 for ONE cycle; the very next cycle it
-    // free-runs to wherever sline_raster already is). Confirmed in sim
-    // (groovy_lineram_realscale_tb): write_line=16/read_line=15 at release - a gap of 1,
-    // not the intended MARGIN=16 - because the raster had already been running for a
-    // while when the fill threshold happened to be crossed. Fix: wait for primed (the
-    // fill threshold) AND the next real frame_start pulse after it, so disp_line's own
-    // reset-driven 0 (which happens exactly at frame_start, see groovy_lineram_scan.v)
-    // is what the writer actually sees as read_line's starting point.
-    logic primed;
-    always_ff @(posedge pix_clk or negedge hdmi_rst_n)
-        if (!hdmi_rst_n) primed <= 1'b0;
-        else if (video_reset_px) primed <= 1'b0;
-        else if (wline_px >= MARGIN[15:0]) primed <= 1'b1;
-
+    // SYNC/FILL gate, REWORKED 2026-08-02 (see the startup-fix comment above raster_en's
+    // declaration for the full history/measurement). Previously this stage alone had to
+    // defend against the raster being at an ARBITRARY phase when priming completed
+    // (2026-07-19 fix: wait for primed AND the next real frame_start). That defense is
+    // now free: the raster itself does not even START counting until raster_en (which
+    // gates video_timing_gen's `en`), so its counter is GUARANTEED to be sitting at
+    // (hcount=0,vcount=0) - having never advanced - the instant raster_en goes high.
+    // The first frame_start after that is therefore always a clean, on-time (0,0) start;
+    // no arbitrary-phase risk remains, so have_frame can simply follow raster_en's own
+    // first frame_start with no separate priming logic.
+    //
+    // ALTERNATIVE NOT TAKEN (flagged per discussion): have_frame <= raster_en directly
+    // (skip waiting for frame_start entirely) would release scanout up to one full video
+    // frame (~16.7ms) EARLIER, but risks showing/losing the first real image if any
+    // downstream stage (DVI_TX, the CDC'd read_line_50 pipeline) still assumes at least
+    // one raster cycle has elapsed before de/hsync/vsync are trustworthy. Worth trying if
+    // that startup latency ever matters, but not validated - keep the frame_start wait
+    // as the safe default for now.
     always_ff @(posedge pix_clk or negedge hdmi_rst_n)
         if (!hdmi_rst_n) have_frame <= 1'b0;
         else if (video_reset_px) have_frame <= 1'b0;
-        else if (primed && frame_start) have_frame <= 1'b1;
+        else if (raster_en && frame_start) have_frame <= 1'b1;
 
     // reader active only after fill; else output black (avoids showing empty ring)
     wire scan_en = have_frame;

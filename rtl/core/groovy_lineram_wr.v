@@ -107,10 +107,27 @@ module groovy_lineram_wr #(
     // write slot; forbidden when that distance is small (the reader is at it or about
     // to reach it soon), safe when large (the reader already passed it and won't
     // return until wrapping all the way around).
+    //
+    // ABSOLUTE-LEAD GUARD (2026-08-02 stabilization pass): the slot-modulo check above
+    // only protects against overwriting a slot the reader is about to VISIT NEXT LAP -
+    // it has no way to tell "3 laps ahead" from "1 lap ahead", since both wrap to some
+    // slot_off value that may or may not land inside MARGIN by pure coincidence. Before
+    // the reader has a real position (read_line pinned at 0 by the top during startup -
+    // see gwline_top.sv's raster_en/have_frame sequencing), the writer could measure a
+    // SAFE slot_off while actually running MULTIPLE ring laps ahead, silently overrunning
+    // the elastic FIFO upstream (measured: ~95k dropped pixels/session on a real udp.sv-
+    // driven testbench, sim/tb/gwline_ring_e2e_tb.v, before this fix). Add a second,
+    // independent check: the RAW (non-modulo) line distance from the reader must also
+    // stay under MARGIN. In steady state (reader actively tracking, gap already small)
+    // this can never fire - it only engages during the startup window where read_line
+    // is genuinely 0 and line has nothing yet to be measured against but that fixed
+    // point, exactly the case the slot-modulo math can't distinguish from "safe".
     wire [LNSEL_W-1:0] candidate_slot = line[LNSEL_W-1:0];
     wire [LNSEL_W-1:0] reader_slot    = read_line[LNSEL_W-1:0];
     wire [LNSEL_W-1:0] slot_off       = candidate_slot - reader_slot;
-    wire               guard_blocks   = guard_en && (slot_off < MARGIN[LNSEL_W-1:0]);
+    wire [15:0]        abs_lead       = line - read_line;
+    wire               guard_blocks   = guard_en && ((slot_off < MARGIN[LNSEL_W-1:0]) ||
+                                                       (abs_lead >= MARGIN[15:0]));
     assign stall = guard_blocks;
 
     wire accept = in_valid && !guard_blocks && !clearing;
