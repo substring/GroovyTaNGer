@@ -293,12 +293,6 @@ module gwline_ring_e2e_tb;
             prev_hf_dbg <= have_frame;
         end
     end
-    always @(posedge clk50m) begin
-        if (sl_we && sl_slot == 5'd12)
-            $display("  [SL_WE slot12] t=%0t sl_line=%0d (0x%0h)", $time, sl_line, sl_line);
-        if (rw_we && rw_slot == 5'd12 && (rw_col == 10'd187))
-            $display("  [WE slot12 col187] t=%0t w_data=%04h line_being_written=%0d", $time, rw_data, u_lrw.line);
-    end
     // trace blit_rx's own byte counter around bytes 64374*... to see if it SKIPS a
     // range (a real loss) or DUPLICATES one (a re-delivery) between the two writes
     reg [31:0] prev_bytes_recv = 0;

@@ -139,6 +139,22 @@ module groovy_lineram_scan #(
     // So de/hs/vs must be delayed by 3 to line up with the pixel (an earlier 2-deep delay
     // was one short -> at a barr boundary one output pixel showed the PREVIOUS column's
     // data = the thin dark/blue seam the user saw between colour bars). de1->de2->de_o.
+    //
+    // KNOWN, ACCEPTED MINOR ARTIFACT (2026-08-02, gwline_ring_e2e_tb.v investigation):
+    // net_frame_start (a new network frame) resets disp_line/sline_frame - and therefore
+    // r_slot - DISCONTINUOUSLY, at whatever hcount the raster happens to be at (network
+    // frame boundaries are async to the raster, can legitimately land mid-line). r_col
+    // keeps following scol/hcount CONTINUOUSLY through that same transition (correct -
+    // the horizontal scan itself never pauses). Net effect: the very first pixel shown
+    // after a network-frame boundary can briefly pair the NEW line with a column value
+    // still catching up from the OLD line's scan position, for exactly one pixel. Traced
+    // and confirmed via direct signal dump (r_slot/r_col/expect_line1/2) - this is NOT a
+    // ring/data-corruption bug (the ring content itself is correct; slot_actual_line
+    // still matches what's read), just a one-pixel visual seam at network-frame
+    // boundaries, same family as (but distinct from) the H_REPL column seam above.
+    // Deliberately left as-is - not visible to the eye, and "fixing" it would mean
+    // forcing a col-0 restart on every net_frame_start, which fights the raster's own
+    // continuous horizontal scan for no real benefit.
     reg de1, hs1, vs1, de2, hs2, vs2;
     reg [15:0] expect_line1, expect_line2;   // sline_frame carried alongside the pipeline
     always @(posedge pix_clk) begin

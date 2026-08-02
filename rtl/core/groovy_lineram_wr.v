@@ -118,10 +118,26 @@ module groovy_lineram_wr #(
     // the elastic FIFO upstream (measured: ~95k dropped pixels/session on a real udp.sv-
     // driven testbench, sim/tb/gwline_ring_e2e_tb.v, before this fix). Add a second,
     // independent check: the RAW (non-modulo) line distance from the reader must also
-    // stay under MARGIN. In steady state (reader actively tracking, gap already small)
-    // this can never fire - it only engages during the startup window where read_line
-    // is genuinely 0 and line has nothing yet to be measured against but that fixed
-    // point, exactly the case the slot-modulo math can't distinguish from "safe".
+    // stay under a bound.
+    //
+    // BOUND = MARGIN (kept, NOT widened to NLINES - tried and reverted 2026-08-02): using
+    // MARGIN as the abs_lead bound has a known, ACCEPTED side effect during startup - it
+    // creates a temporary deadlock on whichever line first reaches abs_lead>=MARGIN while
+    // read_line still sits fixed at 0 (no read_line value in [1, NLINES) can satisfy BOTH
+    // slot_off>=MARGIN and abs_lead<MARGIN at once for that line, since the two conditions
+    // are mutually exclusive whenever the modulo and absolute distances diverge like
+    // this). That deadlock forces groovy_blit_rx's fifo_overflow RECOVERY PATH (col/line
+    // advance without a real write) to run for that one line, leaving its slot's ground
+    // truth at the never-written 0xFFFF sentinel - the reader correctly (if visibly)
+    // rejects it. Widening the bound to NLINES was tried and REVERTED: it removes the
+    // deadlock but reopens the much larger original bug (writer allowed to run laps ahead
+    // again before have_frame), regressing content-corruption errors from ~6k back to
+    // ~255k on the real udp.sv e2e testbench (sim/tb/gwline_ring_e2e_tb.v). MARGIN is the
+    // right tradeoff: one harmless, self-recovering stale-slot flicker at startup versus
+    // real multi-lap corruption. See memory gwline-ring-startup-fifo-fix.md for the full
+    // history and the (still open) idea of feeding the guard sline_raster (unclamped,
+    // progresses from raster_en) instead of the clamped read_line during startup, which
+    // would let the deadlock resolve itself with no accept-side tradeoff at all.
     wire [LNSEL_W-1:0] candidate_slot = line[LNSEL_W-1:0];
     wire [LNSEL_W-1:0] reader_slot    = read_line[LNSEL_W-1:0];
     wire [LNSEL_W-1:0] slot_off       = candidate_slot - reader_slot;
