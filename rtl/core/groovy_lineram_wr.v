@@ -119,42 +119,29 @@ module groovy_lineram_wr #(
     // to reach it soon), safe when large (the reader already passed it and won't
     // return until wrapping all the way around).
     //
-    // ABSOLUTE-LEAD GUARD (2026-08-02 stabilization pass): the slot-modulo check above
-    // only protects against overwriting a slot the reader is about to VISIT NEXT LAP -
-    // it has no way to tell "3 laps ahead" from "1 lap ahead", since both wrap to some
-    // slot_off value that may or may not land inside MARGIN by pure coincidence. Before
-    // the reader has a real position (read_line pinned at 0 by the top during startup -
-    // see gwline_top.sv's raster_en/have_frame sequencing), the writer could measure a
-    // SAFE slot_off while actually running MULTIPLE ring laps ahead, silently overrunning
-    // the elastic FIFO upstream (measured: ~95k dropped pixels/session on a real udp.sv-
-    // driven testbench, sim/tb/gwline_ring_e2e_tb.v, before this fix). Add a second,
-    // independent check: the RAW (non-modulo) line distance from the reader must also
-    // stay under a bound.
-    //
-    // BOUND = MARGIN (kept, NOT widened to NLINES - tried and reverted 2026-08-02): using
-    // MARGIN as the abs_lead bound has a known, ACCEPTED side effect during startup - it
-    // creates a temporary deadlock on whichever line first reaches abs_lead>=MARGIN while
-    // read_line still sits fixed at 0 (no read_line value in [1, NLINES) can satisfy BOTH
-    // slot_off>=MARGIN and abs_lead<MARGIN at once for that line, since the two conditions
-    // are mutually exclusive whenever the modulo and absolute distances diverge like
-    // this). That deadlock forces groovy_blit_rx's fifo_overflow RECOVERY PATH (col/line
-    // advance without a real write) to run for that one line, leaving its slot's ground
-    // truth at the never-written 0xFFFF sentinel - the reader correctly (if visibly)
-    // rejects it. Widening the bound to NLINES was tried and REVERTED: it removes the
-    // deadlock but reopens the much larger original bug (writer allowed to run laps ahead
-    // again before have_frame), regressing content-corruption errors from ~6k back to
-    // ~255k on the real udp.sv e2e testbench (sim/tb/gwline_ring_e2e_tb.v). MARGIN is the
-    // right tradeoff: one harmless, self-recovering stale-slot flicker at startup versus
-    // real multi-lap corruption. See memory gwline-ring-startup-fifo-fix.md for the full
-    // history and the (still open) idea of feeding the guard sline_raster (unclamped,
-    // progresses from raster_en) instead of the clamped read_line during startup, which
-    // would let the deadlock resolve itself with no accept-side tradeoff at all.
+    // DO NOT ADD AN ABSOLUTE-LEAD TERM HERE (tried 2026-08-02, removed 2026-08-09 after
+    // it wedged real hardware). The attempt added `|| (abs_lead >= MARGIN)` alongside the
+    // slot check, meaning to bound how far ahead the writer may run in ABSOLUTE lines,
+    // since slot_off (being mod NLINES) cannot tell "1 lap ahead" from "3 laps ahead".
+    // The two terms are LOGICALLY CONTRADICTORY and their intersection is EMPTY:
+    //   slot_off >= MARGIN  requires the writer to be at LEAST MARGIN lines ahead,
+    //   abs_lead  <  MARGIN  requires the writer to be LESS than MARGIN lines ahead.
+    // So guard_blocks was true for EVERY possible writer/reader distance - a permanent
+    // deadlock the instant guard_en rose, not an occasional timing corner case. It also
+    // closes a feedback loop that cannot self-release: the reader is clamped to
+    // write_line-1 (wr_top in groovy_lineram_scan.v), so read_line cannot advance until
+    // the writer does, while the writer waits on the reader. HW-confirmed with the CL=/GS=
+    // UART fields: CL=227 pinned mid-frame with GS=FFFFFF (saturated, >335 ms on one line),
+    // most of the screen black. Simulation masked it because blit_valid reset `line` to 0
+    // every network frame, handing back a few unguarded cycles each time.
+    // The startup over-run this was meant to stop is already handled upstream by
+    // gwline_top.sv's raster_en (the raster is frozen until START_THRESHOLD lines are
+    // queued, so the writer can no longer build an unbounded lead before the guard
+    // engages). See memory gwline-ring-startup-fifo-fix.md.
     wire [LNSEL_W-1:0] candidate_slot = line[LNSEL_W-1:0];
     wire [LNSEL_W-1:0] reader_slot    = read_line[LNSEL_W-1:0];
     wire [LNSEL_W-1:0] slot_off       = candidate_slot - reader_slot;
-    wire [15:0]        abs_lead       = line - read_line;
-    wire               guard_blocks   = guard_en && ((slot_off < MARGIN[LNSEL_W-1:0]) ||
-                                                       (abs_lead >= MARGIN[15:0]));
+    wire               guard_blocks   = guard_en && (slot_off < MARGIN[LNSEL_W-1:0]);
     assign stall = guard_blocks;
 
     wire accept = in_valid && !guard_blocks && !clearing;
