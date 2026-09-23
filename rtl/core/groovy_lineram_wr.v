@@ -88,10 +88,21 @@ module groovy_lineram_wr #(
     // slot, and how full was the FIFO" for every real write or drop, instead of only
     // the aggregate counters (write_line, stall) previously available.
     output reg  [LNSEL_W-1:0]   target_slot_at_write,
-    output reg  [ADDR_W_FIFO:0] fifo_level_at_write
+    output reg  [ADDR_W_FIFO:0] fifo_level_at_write,
+
+    // DIAGNOSTIC (2026-08-09 HW investigation): write_line only updates when a line
+    // FULLY completes, so on a real stall it silently shows the PREVIOUS line forever -
+    // `cur_line` exposes the in-progress line directly (the one the guard is deciding
+    // about right now), and `guard_stuck_cycles` counts consecutive cycles the guard has
+    // blocked THIS SAME line without it ever completing - lets the UART distinguish "a
+    // brief, self-clearing stall" from "genuinely wedged on one line", which write_line/
+    // stall alone cannot show.
+    output wire [15:0]          cur_line,
+    output reg  [23:0]          guard_stuck_cycles
 );
     reg [15:0] col;    // column within the line currently being written
     reg [15:0] line;   // current source line index (monotonic across one frame)
+    assign cur_line = line;
 
     // CLEAR SWEEP: on rst (includes a CMD_INIT-driven video reset from the top), walk
     // all NLINES slot_line entries back to the FFFF "never written this session"
@@ -148,6 +159,28 @@ module groovy_lineram_wr #(
 
     wire accept = in_valid && !guard_blocks && !clearing;
     assign pop  = accept;
+
+    // DIAGNOSTIC (2026-08-09): count consecutive cycles guard_blocks holds while `line`
+    // hasn't moved - saturates (does not wrap) so the UART can distinguish "briefly
+    // stalled, recovered" (small/reset value) from "genuinely wedged for the rest of
+    // the session" (pinned at max). Reset whenever line actually advances or the guard
+    // releases, so it always reflects the CURRENT stall's age, not a lifetime total.
+    reg [15:0] guard_stuck_line;
+    always @(posedge clk) begin
+        if (rst || frame_start) begin
+            guard_stuck_cycles <= 24'd0;
+            guard_stuck_line   <= 16'd0;
+        end else if (guard_blocks) begin
+            if (line != guard_stuck_line) begin
+                guard_stuck_line   <= line;
+                guard_stuck_cycles <= 24'd1;
+            end else if (guard_stuck_cycles != 24'hFFFFFF) begin
+                guard_stuck_cycles <= guard_stuck_cycles + 24'd1;
+            end
+        end else begin
+            guard_stuck_cycles <= 24'd0;
+        end
+    end
 
     always @(posedge clk) begin
         we    <= 1'b0;

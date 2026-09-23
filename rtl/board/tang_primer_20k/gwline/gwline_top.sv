@@ -341,6 +341,8 @@ module gwline_top (
     wire [15:0] rw_data;  wire [15:0] write_line;  wire rw_stall;
     wire        sl_we;  wire [LNSEL_W-1:0] sl_slot;  wire [15:0] sl_line;
     wire [LNSEL_W-1:0] target_slot_at_write;  wire [12:0] fifo_level_at_write;
+    wire [15:0] cur_line;
+    wire [23:0] guard_stuck_cycles;
     groovy_lineram_wr #(.NLINES(NLINES), .LNSEL_W(LNSEL_W), .COL_W(COL_W), .DATA_W(16),
                         .MARGIN(MARGIN), .ADDR_W_FIFO(12)) u_lrw (
         .clk(clk50m), .rst(video_rst), .frame_start(blit_valid),
@@ -351,7 +353,8 @@ module gwline_top (
         .write_line(write_line), .stall(rw_stall),
         .sl_we(sl_we), .sl_slot(sl_slot), .sl_line(sl_line),
         .target_slot_at_write(target_slot_at_write),
-        .fifo_level_at_write(fifo_level_at_write));
+        .fifo_level_at_write(fifo_level_at_write),
+        .cur_line(cur_line), .guard_stuck_cycles(guard_stuck_cycles));
 
     // ---- the line ring (dual-port BRAM) ----
     wire [LNSEL_W-1:0] r_slot;  wire [COL_W-1:0] r_col;  wire [15:0] r_data;
@@ -639,19 +642,25 @@ module gwline_top (
 
     reg [15:0] q_fc, q_wl, q_rl, q_gp, q_to, q_wo, q_sl, q_st, q_ff, q_vf, q_rj; reg q_hf, q_ur, q_se, q_tl; reg [3:0] q_ov;
     reg [15:0] q_fl; reg [15:0] q_ts;
+    // DIAGNOSTIC (2026-08-09 HW investigation): CL=cur_line (in-progress writer line,
+    // updates even mid-stall unlike WL) GS=guard_stuck_cycles (consecutive cycles the
+    // guard has held THIS line, saturating - distinguishes a brief stall from a real
+    // wedge that write_line/stall alone can't show).
+    reg [15:0] q_cl; reg [23:0] q_gs;
     always @(posedge clk) begin
         q_fc<=frame_cnt; q_wl<=write_line; q_rl<=read_line_50; q_gp<=gp;
         q_hf<=have_frame; q_ur<=ur_s[1]; q_ov<=ov_cnt; q_se<=rx_seen; q_to<=to_cnt;
         q_tl<=tmds_lock_sync[1]; q_wo<=wo_line; q_sl<=slot_actual_line_50;
         q_st<=stall_cnt; q_ff<=fifo_full_cnt; q_vf<=vframe_cnt; q_rj<=rj_cnt;
         q_fl<={3'b0,fifo_level_at_write}; q_ts<={{(16-LNSEL_W){1'b0}},target_slot_at_write};
+        q_cl<=cur_line; q_gs<=guard_stuck_cycles;
     end
 
     wire [7:0] tx_din; wire tx_wr, tx_busy;
     uart_tx_V2 #(.clk_freq(27_000_000), .uart_freq(115200)) u_dbgtx (
         .clk(clk), .din(tx_din), .wr_en(tx_wr), .tx_busy(tx_busy), .tx_p(uart_txp));
     function [7:0] hxd; input [3:0] n; hxd = (n<4'd10)?(8'h30+n):(8'h41+n-4'd10); endfunction
-    localparam [7:0] DBGLEN = 8'd148;
+    localparam [7:0] DBGLEN = 8'd166;
     reg [7:0] di=0, dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0; reg [7:0] dlb;
     always @(*) begin
         case (di)
@@ -685,8 +694,12 @@ module gwline_top (
             113:dlb="F";114:dlb="L";115:dlb="=";
             116:dlb=hxd(q_fl[15:12]);117:dlb=hxd(q_fl[11:8]);118:dlb=hxd(q_fl[7:4]);119:dlb=hxd(q_fl[3:0]);120:dlb=" ";
             121:dlb="T";122:dlb="S";123:dlb="=";
-            124:dlb=hxd(q_ts[15:12]);125:dlb=hxd(q_ts[11:8]);126:dlb=hxd(q_ts[7:4]);127:dlb=hxd(q_ts[3:0]);
-            146:dlb=8'h0D;147:dlb=8'h0A;default:dlb=" ";
+            124:dlb=hxd(q_ts[15:12]);125:dlb=hxd(q_ts[11:8]);126:dlb=hxd(q_ts[7:4]);127:dlb=hxd(q_ts[3:0]);128:dlb=" ";
+            129:dlb="C";130:dlb="L";131:dlb="=";
+            132:dlb=hxd(q_cl[15:12]);133:dlb=hxd(q_cl[11:8]);134:dlb=hxd(q_cl[7:4]);135:dlb=hxd(q_cl[3:0]);136:dlb=" ";
+            137:dlb="G";138:dlb="S";139:dlb="=";
+            140:dlb=hxd(q_gs[23:20]);141:dlb=hxd(q_gs[19:16]);142:dlb=hxd(q_gs[15:12]);143:dlb=hxd(q_gs[11:8]);144:dlb=hxd(q_gs[7:4]);145:dlb=hxd(q_gs[3:0]);
+            164:dlb=8'h0D;165:dlb=8'h0A;default:dlb=" ";
         endcase
     end
     always @(posedge clk) begin
