@@ -273,13 +273,13 @@ def send_blitrace(sock, addr, args):
     # frame's pixels at the GAME's pixel rate. We do the same: send the frame's source
     # lines at a fixed cadence tuned to the FPGA raster's consumption rate, so the write
     # pointer tracks the read pointer within the line-ring depth (NLINES). The FIFO+ring
-    # absorb jitter; the FPGA's OV (fifo_overflow) flag catches over-run (send too fast),
-    # a persistent UR (underrun) means too slow. Tune --linerate to sit between.
+    # absorbs jitter; the FPGA UART reports the outcome (GL= valid output lines per video
+    # frame, LT= the writer's measured lead). Tune --lead until LT sits mid-window.
     #
     # Consumption rate: the reader drains SRC_H source lines per FRAME PERIOD (1/refresh),
     # so the sustainable average is line_period = 1/(refresh*h). We send lines_per_dgram
-    # lines per datagram and sleep line_period*lines_per_dgram between datagrams, scaled
-    # by --linerate (1.0 = match; >1 = send faster/ahead, <1 = slower).
+    # lines per datagram and wait line_period*lines_per_dgram between datagrams. The rate
+    # is not adjustable: a line ring only works at exactly the raster's rate.
     if args.file:
         w, h, frame = load_image_rgb565(args.file)
         ml = calc_modeline(w, h, args.refresh, args.monitor, args.dotclock_min)
@@ -304,8 +304,22 @@ def send_blitrace(sock, addr, args):
 
     # PACING with PHASE LOCK to the FPGA raster (loose loop, PC time-master).
     # line_period = wall time per SOURCE line. frame_period = one video frame.
-    line_period  = 1.0 / (args.refresh * h) if h else 0.0
+    # The FPGA raster spends vactive of its vtotal output lines on the picture and the
+    # rest in vertical blanking, so in SOURCE lines one video frame is h*vtotal/vactive
+    # long (250 for 240 lines in 720p) and the raster crosses one source line every
+    # frame_period/250 = 66.7 us - NOT frame_period/240. Two things depend on that:
+    #  - pacing: sending at the raster's own line rate, then idling through blanking,
+    #    keeps the writer's lead CONSTANT down the frame. Spreading the lines over the
+    #    whole frame instead lets the raster gain ~10 lines on the writer by the bottom,
+    #    which costs a third of the 32-line ring (valid lead 10..30 vs 1..28, measured in
+    #    sim/tb/groovy_linering_beamrace_tb.sv, +RPACE).
+    #  - phase lock: the raster line reported in the ACK runs 0..249, and the time left
+    #    to the next line 0 is (250 - v) raster lines. Treating it as (240 - v) frame/240
+    #    periods mis-placed the lock by up to 10 lines depending on when it was polled.
     frame_period = 1.0 / args.refresh
+    raster_lines = h * args.vtotal / args.vactive          # source lines per video frame
+    raster_line  = frame_period / raster_lines if h else 0.0
+    line_period  = raster_line if args.pace == "raster" else frame_period / h
     lpd    = max(1, args.group)                            # lines per datagram
     period = line_period * lpd                            # busy-spin cadence per datagram
 
@@ -315,11 +329,11 @@ def send_blitrace(sock, addr, args):
     # the perf_counter instant the FPGA raster will next be at line 0.
     def next_vsync():
         v = _read_ack_vcount(sock, addr)
-        if v is None or v >= h:
+        if v is None or v >= raster_lines:
             return None
         now = time.perf_counter()
-        # lines remaining until the raster wraps to 0
-        return now + (h - v) * line_period
+        # raster lines remaining until it wraps to source line 0 (blanking included)
+        return now + (raster_lines - v) * raster_line
     t_vsync = None
     for _ in range(20):
         t_vsync = next_vsync()
@@ -330,13 +344,16 @@ def send_blitrace(sock, addr, args):
         t_vsync = time.perf_counter()
     else:
         print(f"phase lock: next FPGA vsync in {(t_vsync-time.perf_counter())*1e3:.2f}ms")
-    print(f"pacing: line_period={line_period*1e6:.1f}us {lpd} line/dgram, "
-          f"phase-locked to FPGA raster, resync {args.resync_hz}Hz")
+    print(f"pacing: {args.pace}, line_period={line_period*1e6:.1f}us {lpd} line/dgram, "
+          f"lead {args.lead} lines, phase-locked to FPGA raster, resync {args.resync_hz}Hz")
+    if args.frames < 30:
+        print("NOTE: a line ring holds 32 lines, not a picture - it only shows something "
+              "while frames keep coming. Use --frames 600 or more to judge the result.")
 
     frames = args.frames
     resync_period = 1.0 / args.resync_hz if args.resync_hz > 0 else 1e18
     next_resync = time.perf_counter() + resync_period
-    lead_t = args.lead * line_period                      # writer runs this far AHEAD
+    lead_t = args.lead * raster_line                      # writer runs this far AHEAD
     for f in range(frames):
         # each frame targets a vsync instant; advance t_vsync one frame at a time.
         # The writer must LEAD the raster by `lead` lines (not be synchronous with it -
@@ -384,6 +401,12 @@ def send_blitrace(sock, addr, args):
         if args.verbose and f % 60 == 0:
             print(f"frame {f+1}")
     print(f"blitrace: {frames} frame(s) {w}x{h}, phase-locked -> {addr[0]}:{addr[1]}")
+    # Final status: ACK status bit0 set = the last video frame was NOT fully valid.
+    try:
+        sock.sendto(struct.pack("<B", CMD_GET_STATUS), addr)
+        print(decode_reply(sock.recvfrom(64)[0]))
+    except OSError:
+        print("(no final status)")
 
 
 def send_blitfile(sock, addr, args):
@@ -499,21 +522,28 @@ def main():
     br = sub.add_parser("blitrace",
         help="BEAM-RACE paced blit (open-loop rate match): streams a frame's lines at a "
              "fixed cadence tuned to the FPGA raster consumption so the line-ring tracks "
-             "(no over/underrun). Tune --linerate; watch the FPGA OV/UR flags")
+             "(no over/underrun). Tune --lead; watch GL=/LT= on the FPGA UART")
     br.add_argument("--width", type=int, default=320)
     br.add_argument("--height", type=int, default=240)
     br.add_argument("--file", default=None, help="native image (runs switchres); omit for a gradient")
-    br.add_argument("--linerate", type=float, default=1.0,
-                    help="send-rate scale vs raster consumption (1.0=match, >1 faster, <1 slower)")
     br.add_argument("--group", type=int, default=2, help="source lines per datagram (2 = sweet spot; keep datagram <= MTU)")
     br.add_argument("--pattern", choices=["bars", "hbars", "gradient"], default="bars",
                     help="bars=vertical colour bars, hbars=horizontal (reveals ring persistence), gradient")
     br.add_argument("--header-gap", type=float, default=0.0005,
                     help="seconds of quiet before each frame's BLIT header (lets blitting fall)")
-    br.add_argument("--lead", type=int, default=20, help="lines the writer stays ahead of the raster (MARGIN)")
+    br.add_argument("--lead", type=int, default=16,
+                    help="raster lines the writer starts ahead of the beam. Read the result back "
+                         "as LT= on the FPGA UART (LT is lower than --lead by the network path "
+                         "delay, ~2-4 lines); aim for LT around 0x0C..0x12")
+    br.add_argument("--pace", choices=["raster", "frame"], default="raster",
+                    help="raster = send lines at the raster's own line rate then idle through "
+                         "vertical blanking (constant lead; default). frame = spread the lines "
+                         "evenly over the whole frame period (old behaviour)")
+    br.add_argument("--vtotal", type=int, default=750, help="FPGA output raster total lines (720p: 750)")
+    br.add_argument("--vactive", type=int, default=720, help="FPGA output raster active lines (720p: 720)")
     br.add_argument("--resync-hz", type=float, default=2.0,
                     help="how often to re-read the FPGA vCount and correct phase drift (0=never)")
-    br.add_argument("--frames", type=int, default=1)
+    br.add_argument("--frames", type=int, default=600, help="frames to stream (600 = 10 s)")
     br.add_argument("--vsync", type=int, default=1, help=">0 = beam-race target line")
     br.add_argument("--refresh", type=float, default=60.0, help="refresh Hz (sets line cadence)")
     br.add_argument("--monitor", default="arcade_15")
