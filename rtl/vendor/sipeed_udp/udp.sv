@@ -434,7 +434,9 @@ always_ff@(posedge clk50m or negedge phy_rdy)begin
             20:begin
                 //如果fifo满了，就直接拒绝接收
                 //head 剩余空间小于4 或者 data 剩余空间小于1600
-                if((rx_data_fifo_tail + 127 - rx_data_fifo_head_int) % 128 < 4)begin
+                // Groovy_Tang fix: upstream tested the DATA fifo pointers here (mod 128), which
+                // rejected datagrams at random whenever the data fifo was not empty.
+                if((rx_head_fifo_tail + 127 - rx_head_fifo_head_int) % 128 < 4)begin
                     ethernet_resolve_status <= 100;
                     rx_reject_o <= 1'b1;   // Groovy_Tang add: head FIFO was too full
                 end
@@ -1196,19 +1198,53 @@ assign crc_next[30] = crc[22] ^ crc[28] ^ crc[31] ^ data_i[4] ^ data_i[7];
 assign crc_next[31] = crc[23] ^ crc[29] ^ data_i[5];
 
 
-shortint begin_ptr;
-shortint end_ptr;
+// Groovy_Tang (2026-10-11): REWORKED so a frame may ARRIVE while the previous one is
+// still DRAINING. The original kept a single begin/end pointer pair and (a) wrote the
+// next frame's first byte ON TOP of the previous frame's last, not-yet-drained byte,
+// and (b) ended the drain on a live `begin_ptr == end_ptr` compare that the incoming
+// frame keeps moving. Draining costs 1 cycle/byte, so the stack silently required an
+// inter-frame gap >= the previous frame's length in clk50m cycles (~26 us for a 1326-
+// byte frame); anything tighter lost BOTH frames (sim: sim/tb/udp_ifg_sweep_tb.v -
+// 12/12 frames at a 1300-cycle gap, 0/12 at 1200). gwline's nominal pixel stream
+// leaves only ~32 us between datagrams, i.e. ~6 us of sender-jitter margin - this is
+// what the "100 Mb/s saturation knee" measured with udpstress really was.
+// Now: every CRC-good frame's last-byte index is queued, the next frame is stored
+// right after it, and the drain runs to its own latched end. Reception and drain are
+// independent; the minimum gap is the Ethernet IFG.
+logic [10:0] begin_ptr;     // next byte to drain
+logic [10:0] end_ptr;       // next free write position
+logic [10:0] wr_start;      // where the frame being received began (rewind point)
+logic        overrun;       // incoming frame ran into undrained data -> drop it
+logic [2:0]  flen;          // saturating length of the frame being received
 
-logic sendout;
+localparam int QD = 4;      // CRC-good frames waiting for the drain (runts can pile up
+logic [10:0] q_last [QD-1:0];   // behind one long frame; a 5th is dropped)
+logic [1:0]  q_wr, q_rd;
+logic [2:0]  q_cnt;
+
+logic [10:0] cur_last;      // inclusive last byte of the frame being drained
+logic        sendout;
+logic [2:0]  gap;           // idle cycles between two drains (downstream needs rdy=0
+                            // for a cycle to reset its byte counter / state)
 
 logic [7:0] bdata_gd;
 logic brdy;
 logic bfin;
 
+wire stp_ok  = stp && (crc == 32'hC704DD7B) && !overrun && (flen >= 3'd5)
+                   && (q_cnt != QD[2:0]);
+wire do_pop  = !sendout && (q_cnt != 3'd0) && (gap == 3'd0);
+
 always_ff@(posedge clk or negedge rst)begin
     if(rst == 1'b0)begin
         begin_ptr <= 0;
         end_ptr <= 0;
+        wr_start <= 0;
+        overrun <= 1'b0;
+        flen <= 0;
+        q_wr <= 0; q_rd <= 0; q_cnt <= 0;
+        cur_last <= 0;
+        gap <= 0;
         rdy <= 1'b0;
         fin <= 1'b0;
 
@@ -1227,39 +1263,52 @@ always_ff@(posedge clk or negedge rst)begin
         brdy <= 1'b0;
         bfin <= 1'b0;
 
+        if(gap != 3'd0) gap <= gap - 3'd1;
 
-
+        // ---- drain side ----
         if(sendout)begin
             brdy <= 1'b1;
-            if(begin_ptr == end_ptr)begin
+            begin_ptr <= begin_ptr + 11'd1;       // 11 bits: wraps at 2048 by itself
+            if(begin_ptr == cur_last)begin
                 sendout <= 1'b0;
                 bfin <= 1'b1;
-            end else begin
-                begin_ptr <= begin_ptr + 16'd1;
-                if(begin_ptr == 2047)begin_ptr<=0;
+                gap <= 3'd4;
             end
+        end else if(do_pop)begin
+            sendout <= 1'b1;
+            cur_last <= q_last[q_rd];
+            q_rd <= q_rd + 2'd1;
         end
 
-
+        // ---- receive side ----
         if(stp)begin
-            if(crc == 32'hC704DD7B)begin
-                //start output the data
-                sendout <= 1'b1;
-                end_ptr <= (end_ptr + 16'd2043)%16'd2048;
+            if(stp_ok)begin
+                // keep [wr_start .. end-5]; the 4 FCS bytes are reused by the next frame
+                q_last[q_wr] <= end_ptr - 11'd5;
+                q_wr <= q_wr + 2'd1;
+                end_ptr <= end_ptr - 11'd4;
+                wr_start <= end_ptr - 11'd4;
             end else begin
-                //drop the data
-                begin_ptr <= end_ptr;
+                end_ptr <= wr_start;              // bad CRC / overrun / queue full: rewind
             end
             crc <= 32'hFFFFFFFF;
+            overrun <= 1'b0;
+            flen <= 0;
         end else begin
             if(av)begin
-                buffer[end_ptr] <= data;
-                end_ptr <= end_ptr + 16'd1;
-                if(end_ptr == 2047)end_ptr<=0;
+                if(end_ptr + 11'd1 == begin_ptr)begin
+                    overrun <= 1'b1;              // never write over undrained data
+                end else begin
+                    buffer[end_ptr] <= data;
+                    end_ptr <= end_ptr + 11'd1;
+                end
+                if(flen != 3'd7) flen <= flen + 3'd1;
 
                 crc <= crc_next;
             end
         end
+
+        q_cnt <= q_cnt + {2'b0, stp_ok} - {2'b0, do_pop};
     end
 end
 
