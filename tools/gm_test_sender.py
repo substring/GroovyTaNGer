@@ -321,6 +321,7 @@ class VideoFrames:
         self.q = queue.Queue(maxsize=240)                  # ~4 s ahead at 60 fps
         self.last = bytes(self.size)
         self.late = 0; self.loops = 0; self.stop = False
+        self.failed = False                                # a pass produced no frame at all
         self._sp = subprocess
         self.proc = None
         self.t = threading.Thread(target=self._run, daemon=True)
@@ -337,16 +338,21 @@ class VideoFrames:
         while not self.stop:
             p = self.proc = self._sp.Popen(self._cmd(), stdout=self._sp.PIPE,
                                            stderr=self._sp.DEVNULL)
+            got = 0
             while not self.stop:
                 buf = p.stdout.read(self.size)
                 if len(buf) < self.size:
                     break
+                got += 1
                 while not self.stop:                       # never block forever on a full
                     try:                                   # queue: close() must get through
                         self.q.put(buf, timeout=0.1); break
                     except queue.Full:
                         pass
             p.kill(); p.wait()
+            if got == 0:                                   # unreadable file: do not respawn
+                self.failed = True                         # ffmpeg in a tight loop
+                return
             if not self.stop:
                 self.loops += 1
 
@@ -360,7 +366,7 @@ class VideoFrames:
 
     def prefill(self, n, timeout=10.0):
         t_end = time.perf_counter() + timeout
-        while self.q.qsize() < n and time.perf_counter() < t_end:
+        while self.q.qsize() < n and time.perf_counter() < t_end and not self.failed:
             time.sleep(0.01)
 
     def get(self):
