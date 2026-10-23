@@ -274,6 +274,71 @@ def _read_ack_vcount(sock, addr):
     return vcount
 
 
+CMD_SET_BEACON = 11      # Groovy_Tang extension: {11, enable} -> 16-byte "GTB1" raster beacons
+SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)   # Linux; Python does not export it
+
+class BeaconClock:
+    """Raster phase from the FPGA's pushed beacons (CMD_SET_BEACON).
+
+    The FPGA builds one beacon per video frame when the raster enters vertical blanking
+    and reports the raster line at that instant. The arrival time is taken from the
+    KERNEL receive timestamp (SO_TIMESTAMPNS), not from when this script gets round to
+    reading the socket - blitrace busy-spins for a whole frame between reads. Kernel
+    timestamps are CLOCK_REALTIME; they are mapped onto perf_counter once at start."""
+    def __init__(self, sock, raster_lines, raster_line, latency):
+        self.sock, self.raster_lines, self.raster_line, self.latency = sock, raster_lines, raster_line, latency
+        sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
+        self.rt_to_pc = time.perf_counter() - time.time()
+        self.last_vsync = None                 # perf_counter of the vsync after the last beacon
+        self.n = 0; self.lost = 0; self.last_seq = None
+        self.gl_bad = 0; self.gl_min = None; self.lt = []; self.gl = []
+        self.status_replies = []
+
+    def poll(self):
+        """Read everything queued; return True if at least one beacon came in."""
+        got = False
+        while select.select([self.sock], [], [], 0)[0]:
+            try:
+                data, anc, _, _ = self.sock.recvmsg(64, socket.CMSG_SPACE(16))
+            except OSError:
+                break
+            if len(data) == 16 and data[:4] == b"GTB1":
+                t_rx = None
+                for lvl, typ, cd in anc:
+                    if lvl == socket.SOL_SOCKET and typ == SO_TIMESTAMPNS:
+                        sec, nsec = struct.unpack("qq", cd[:16])
+                        t_rx = sec + nsec * 1e-9 + self.rt_to_pc
+                if t_rx is None:
+                    t_rx = time.perf_counter()
+                _, vf, line, gl, lt, st, seq = struct.unpack("<4sIHHHBB", data)
+                if self.last_seq is not None:
+                    self.lost += (seq - self.last_seq - 1) & 0xFF
+                self.last_seq = seq
+                self.n += 1
+                self.gl_min = gl if self.gl_min is None else min(self.gl_min, gl)
+                self.gl_bad += (gl != 720)
+                self.lt.append(lt)
+                self.gl.append(gl)
+                # built at raster line `line`, ~latency ago: next line 0 comes
+                # (raster_lines - line) raster lines after the build instant
+                self.last_vsync = t_rx - self.latency + (self.raster_lines - line) * self.raster_line
+                got = True
+            elif len(data) == 13:
+                self.status_replies.append(data)   # ACKs of BLIT headers: ignored
+        return got
+
+    def summary(self, skip=0):
+        lt = self.lt[skip:] or self.lt
+        if lt and len(lt) > 20:
+            # LT over time, 10 evenly spaced samples: shows a drift or a jump at a glance
+            step = len(lt) // 10
+            print("LT over the stream:", " ".join(str(lt[i]) for i in range(0, len(lt), step)))
+            bad = [i for i, g in enumerate(self.gl) if g != 720]
+            print("beacons with GL!=720 (index of", len(self.gl), "):", bad[:20])
+        return (f"beacons: {self.n} received, {self.lost} lost; frames with GL!=720: {self.gl_bad} "
+                f"(min GL {self.gl_min}); LT {min(lt) if lt else '-'}..{max(lt) if lt else '-'}")
+
+
 def send_blitrace(sock, addr, args):
     # BEAM-RACE paced blit (OPEN-LOOP RATE MATCH). While blitting, the FPGA treats every
     # datagram as pixel DATA (blit framing) and cannot answer CMD_GET_STATUS mid-frame,
@@ -343,7 +408,20 @@ def send_blitrace(sock, addr, args):
         # raster lines remaining until it wraps to source line 0 (blanking included)
         return now + (raster_lines - v) * raster_line
     t_vsync = None
-    for _ in range(20):
+    bclk = None
+    if args.beacon:
+        # PUSHED phase reference: enable the FPGA beacon and lock on the first one
+        bclk = BeaconClock(sock, raster_lines, raster_line, args.beacon_latency)
+        sock.sendto(bytes([CMD_SET_BEACON, 1]), addr)
+        t_end = time.perf_counter() + 0.5
+        while bclk.last_vsync is None and time.perf_counter() < t_end:
+            bclk.poll(); time.sleep(0.001)
+        if bclk.last_vsync is not None:
+            t_vsync = bclk.last_vsync
+            print("beacon lock: FPGA raster beacons received")
+        else:
+            print("(no beacon in 0.5 s: does this bitstream support CMD_SET_BEACON?)")
+    for _ in range(0 if t_vsync is not None else 20):
         t_vsync = next_vsync()
         if t_vsync is not None:
             break
@@ -392,6 +470,17 @@ def send_blitrace(sock, addr, args):
             _pace_until(t_line)
         t_vsync += frame_period                           # next frame's vsync (predicted)
 
+        # --- BEACON: the FPGA pushed its raster phase; align the next vsync on it ---
+        if bclk is not None:
+            if bclk.poll():
+                k = round((t_vsync - bclk.last_vsync) / frame_period)
+                corrected = bclk.last_vsync + k * frame_period
+                if args.verbose and f % 60 == 0:
+                    print(f"beacon @f{f+1}: phase error {(corrected - t_vsync)*1e6:+.1f}us")
+                t_vsync = corrected
+            if args.verbose and f % 60 == 0:
+                print(f"frame {f+1}")
+            continue
         # --- LOOSE RESYNC (~resync_hz): re-read vCount between frames, correct t_vsync ---
         # We're now in the inter-frame gap (blitting just fell). Poll the true raster line
         # and nudge t_vsync toward it, absorbing the PC<->FPGA clock drift.
@@ -409,6 +498,14 @@ def send_blitrace(sock, addr, args):
         if args.verbose and f % 60 == 0:
             print(f"frame {f+1}")
     print(f"blitrace: {frames} frame(s) {w}x{h}, phase-locked -> {addr[0]}:{addr[1]}")
+    if bclk is not None:
+        time.sleep(0.05); bclk.poll()
+        print(bclk.summary(skip=3))
+        sock.sendto(bytes([CMD_SET_BEACON, 0]), addr)        # back to stock behaviour
+        time.sleep(0.02)
+        while select.select([sock], [], [], 0)[0]:
+            try: sock.recv(64)
+            except OSError: break
     # Final status: ACK status bit0 set = the last video frame was NOT fully valid.
     try:
         sock.sendto(struct.pack("<B", CMD_GET_STATUS), addr)
@@ -557,6 +654,11 @@ def main():
     br.add_argument("--monitor", default="arcade_15")
     br.add_argument("--dotclock-min", dest="dotclock_min", type=float, default=25.0)
     br.add_argument("--verbose", action="store_true")
+    br.add_argument("--beacon", action="store_true",
+                    help="phase-lock on the FPGA's pushed raster beacons (CMD_SET_BEACON) "
+                         "instead of polling CMD_GET_STATUS; prints per-frame picture health")
+    br.add_argument("--beacon-latency", dest="beacon_latency", type=float, default=25e-6,
+                    help="one-way FPGA->PC beacon latency in seconds (default 25 us)")
     bs = sub.add_parser("blitstream", help="continuous animated frames (stream/double-buffer test)")
     bs.add_argument("--width", type=int, default=100)
     bs.add_argument("--height", type=int, default=75)

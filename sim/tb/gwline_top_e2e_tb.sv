@@ -67,7 +67,7 @@ module gwline_top_e2e_tb;
         begin if ($realtime < t) #(t - $realtime); @(posedge clk50m); end
     endtask
 
-    integer i, f, d;  real t0;  reg sender_done = 0;
+    integer i, f, d, hdr, n_status_sent = 0;  real t0;  reg sender_done = 0;  real beacon_on_at = -1.0;
     initial begin
         void'($value$plusargs("DIR=%s", dir));
         void'($value$plusargs("LEAD=%d", lead));
@@ -76,7 +76,10 @@ module gwline_top_e2e_tb;
         $readmemh({dir, "/stream_idx.hex"}, sidx);
         while (nframes_eth < 1024 && sidx[nframes_eth] !== 64'hx && sidx[nframes_eth][55:32] != 0)
             nframes_eth = nframes_eth + 1;
-        nf_net = (nframes_eth - 1) / 121;
+        hdr = 0;                                         // ARP, INIT [, CMD_SET_BEACON]
+        while (hdr < nframes_eth && sidx[hdr][63:56] != 8'd1) hdr = hdr + 1;
+        nf_net = 0;
+        for (i = 0; i < nframes_eth; i = i + 1) if (sidx[i][63:56] == 8'd1) nf_net = nf_net + 1;
         $display("stream: %0d ethernet frames = %0d network frames, lead=%0d", nframes_eth, nf_net, lead);
 
         // udp.sv waits on real MDIO negotiation for phy_rdy: give it a clean 0->1 edge.
@@ -85,13 +88,17 @@ module gwline_top_e2e_tb;
         repeat (20) @(posedge clk50m);  force dut.udp_inst.phy_rdy = 1'b1;
         #5000;
 
-        send_eth(0);                                    // CMD_INIT (rgb565)
-        #200_000;
+        for (i = 0; i < hdr; i = i + 1) begin            // ARP, CMD_INIT (rgb565), beacon on
+            send_eth(i);
+            if (sidx[i][63:56] == 8'd3) beacon_on_at = $realtime;
+            #100_000;
+        end
+        #100_000;
         @(posedge dut.frame_start);                     // lock to the raster
         t0 = $realtime + FRAME_T - lead * LINE_T;
         if (t0 < $realtime + 300_000.0) t0 = t0 + FRAME_T;
 
-        i = 1;
+        i = hdr;
         for (f = 0; f < nf_net; f = f + 1) begin
             // BLIT header timed to END gap_hdr cycles before the first pixel datagram:
             // a runt immediately followed by a full-size frame (72 bytes * 80 ns).
@@ -100,6 +107,10 @@ module gwline_top_e2e_tb;
             for (d = 0; d < 120; d = d + 1) begin
                 wait_until(t0 + f * FRAME_T + d * DGRAM_T);
                 send_eth(i);  i = i + 1;
+            end
+            // optional CMD_GET_STATUS burst between frames: replies close together
+            while (i < nframes_eth && sidx[i][63:56] == 8'd4) begin
+                #2000;  send_eth(i);  i = i + 1;  n_status_sent = n_status_sent + 1;
             end
         end
         sender_done = 1;
@@ -144,12 +155,118 @@ module gwline_top_e2e_tb;
         end
     end
 
+    // ------------------------------------------------------------ what udp.sv puts on the wire
+    // RMII TX decoded back into Ethernet frames (dibits LSB first), and every frame
+    // checked: FCS, IPv4 header checksum, UDP length + checksum. Catches a corrupted or
+    // misaligned TX FIFO, which the byte stream into udp.sv cannot show.
+    reg [7:0] fr [0:1599];  integer fn = 0, dib = 0;  reg [7:0] sh;  reg txen_q = 0, in_frame = 0;
+    integer tx_frames = 0, tx_bad = 0, tx_udp = 0, tx_arp = 0, tx_acks = 0, tx_beacons = 0;
+    real t_fire = -1.0, bc_delay_max = 0.0;              // beacon trigger -> end of its frame
+    always @(posedge clk50m) if (dut.beacon_fire) t_fire = $realtime;
+    function automatic [31:0] crc32_upd(input [31:0] c, input [7:0] b);
+        integer q; reg [31:0] r; begin r = c ^ b;
+        for (q = 0; q < 8; q = q + 1) r = r[0] ? (r >> 1) ^ 32'hEDB88320 : (r >> 1);
+        crc32_upd = r; end
+    endfunction
+    function automatic [15:0] csum_fold(input [31:0] x);
+        reg [31:0] y; begin y = x; while (y[31:16] != 0) y = y[15:0] + y[31:16]; csum_fold = y[15:0]; end
+    endfunction
+    task automatic check_tx_frame;
+        integer s0, q, iphl, iplen, ulen; reg [31:0] c, sum; reg bad; begin
+        bad = 0;  s0 = 0;                                   // fr[] starts after the SFD
+        tx_frames = tx_frames + 1;
+        if (fn < 64) begin
+            bad = 1; $write("TX: runt (%0d bytes after SFD):", fn);
+            for (q = 0; q < 16 && q < fn; q = q + 1) $write(" %h", fr[q]);  $write("\n");
+        end
+        else begin
+            c = 32'hFFFFFFFF;
+            for (q = s0; q < fn - 4; q = q + 1) c = crc32_upd(c, fr[q]);
+            c = ~c;
+            if (c != {fr[fn-1], fr[fn-2], fr[fn-3], fr[fn-4]}) begin bad = 1; $display("TX: bad FCS at %0t", $time); end
+            if ({fr[s0+12], fr[s0+13]} == 16'h0806) tx_arp = tx_arp + 1;
+            else if ({fr[s0+12], fr[s0+13]} == 16'h0800) begin
+                iphl = (fr[s0+14] & 15) * 4;  iplen = {fr[s0+16], fr[s0+17]};
+                sum = 0;  for (q = 0; q < iphl; q = q + 2) sum = sum + {fr[s0+14+q], fr[s0+15+q]};
+                if (csum_fold(sum) != 16'hFFFF) begin bad = 1; $display("TX: bad IP checksum at %0t", $time); end
+                if (fr[s0+23] == 8'h11) begin
+                    ulen = {fr[s0+14+iphl+4], fr[s0+14+iphl+5]};
+                    if (ulen != iplen - iphl) begin bad = 1; $display("TX: UDP len %0d vs IP %0d at %0t", ulen, iplen - iphl, $time); end
+                    else begin
+                        sum = 32'h11 + ulen;
+                        for (q = 0; q < 8; q = q + 2) sum = sum + {fr[s0+26+q], fr[s0+27+q]};   // src+dst ip
+                        for (q = 0; q < ulen; q = q + 2)
+                            sum = sum + {fr[s0+14+iphl+q], (q + 1 < ulen) ? fr[s0+15+iphl+q] : 8'h00};
+                        if (csum_fold(sum) != 16'hFFFF) begin bad = 1; $display("TX: bad UDP checksum (len %0d) at %0t", ulen, $time); end
+                        else begin
+                            tx_udp = tx_udp + 1;
+                            if (ulen - 8 == 13) tx_acks = tx_acks + 1;
+                            if (ulen - 8 == 16) begin
+                                tx_beacons = tx_beacons + 1;
+                                if (t_fire >= 0 && $realtime - t_fire > bc_delay_max) bc_delay_max = $realtime - t_fire;
+                            end
+                        end
+                    end
+                end
+            end else begin bad = 1; $display("TX: ethertype %h at %0t", {fr[s0+12], fr[s0+13]}, $time); end
+        end
+        if (bad) tx_bad = tx_bad + 1;
+        end
+    endtask
+    always @(posedge clk50m) begin
+        txen_q <= netrmii.txen;
+        if (netrmii.txen) begin
+            if (!in_frame) begin                            // preamble 01 01 ..., SFD ends 11
+                if (netrmii.txd == 2'b11) begin in_frame = 1; dib = 0; fn = 0; end
+            end else begin
+                sh = {netrmii.txd, sh[7:2]};  dib = dib + 1;
+                if (dib == 4) begin dib = 0; if (fn < 1600) fr[fn] = sh; fn = fn + 1; end
+            end
+        end else if (txen_q) begin
+            check_tx_frame;  fn = 0;  dib = 0;  in_frame = 0;
+        end
+    end
+
+    // ------------------------------------------------------------ raster beacons (clk50m)
+    // Every datagram the top hands to udp.sv, rebuilt from the arbiter's byte stream.
+    // A beacon (16 bytes, "GTB1") must come once per video frame, built when the raster
+    // enters vertical blanking (source line 240), seq +1 each, video_frame +1 each.
+    reg [7:0] txb [0:63];  integer txn = 0, n_beacon = 0, bc_err = 0, last_seq = -1;
+    integer last_vf = -1, bc_gl_min = 9999, bc_gl_max = -1, bc_lt_min = 9999, bc_lt_max = -1;
+    integer bc_vf, bc_rl, bc_gl, bc_lt, bc_sq;
+    always @(posedge clk50m) begin
+        if (dut.tx_data_av) begin if (txn < 64) txb[txn] = dut.tx_data; txn = txn + 1; end
+        if (dut.tx_req) begin
+            if (txn == 16 && txb[0] == "G" && txb[1] == "T" && txb[2] == "B" && txb[3] == "1") begin
+                bc_vf = {txb[7], txb[6], txb[5], txb[4]};  bc_rl = {txb[9], txb[8]};
+                bc_gl = {txb[11], txb[10]};  bc_lt = {txb[13], txb[12]};  bc_sq = txb[15];
+                n_beacon = n_beacon + 1;
+                if (bc_rl != 240) begin bc_err = bc_err + 1; $display("BEACON: raster_line %0d != 240", bc_rl); end
+                if (last_seq >= 0 && bc_sq != ((last_seq + 1) & 255)) begin bc_err = bc_err + 1; $display("BEACON: seq %0d after %0d", bc_sq, last_seq); end
+                if (last_vf >= 0 && bc_vf != last_vf + 1) begin bc_err = bc_err + 1; $display("BEACON: video_frame %0d after %0d", bc_vf, last_vf); end
+                last_seq = bc_sq;  last_vf = bc_vf;
+                if (sender_done == 0 && n_beacon > 3) begin       // stream running: picture health
+                    if (bc_gl < bc_gl_min) bc_gl_min = bc_gl;  if (bc_gl > bc_gl_max) bc_gl_max = bc_gl;
+                    if (bc_lt < bc_lt_min) bc_lt_min = bc_lt;  if (bc_lt > bc_lt_max) bc_lt_max = bc_lt;
+                end
+            end
+            txn = 0;
+        end
+    end
+
     initial begin
         wait (sender_done);
         #(FRAME_T * 1.2);
         $display("SUMMARY lead=%0d gap_hdr=%0d : %0d/%0d network frames shown pixel-perfect; RD=%0d TO=%0d RJ=%0d",
                  lead, gap_hdr, perfect_frames, nf_net, dut.frame_cnt, dut.to_cnt, dut.rj_cnt);
-        if (perfect_frames == nf_net && dut.frame_cnt == nf_net && dut.to_cnt == 0)
+        if (beacon_on_at >= 0)
+            $display("BEACON %0d beacons over %0d video frames since enabled, %0d errors; while streaming GL %0d..%0d LT %0d..%0d",
+                     n_beacon, $rtoi(($realtime - beacon_on_at) / FRAME_T), bc_err,
+                     bc_gl_min, bc_gl_max, bc_lt_min, bc_lt_max);
+        $display("TX %0d frames on the wire: %0d BAD, %0d UDP (%0d ACK-sized, %0d beacons), %0d ARP; %0d status requests sent; beacon trigger->wire max %0.1f us",
+                 tx_frames, tx_bad, tx_udp, tx_acks, tx_beacons, tx_arp, n_status_sent, bc_delay_max / 1000.0);
+        if (perfect_frames == nf_net && dut.frame_cnt == nf_net && dut.to_cnt == 0 && tx_bad == 0 &&
+            (beacon_on_at < 0 || (n_beacon >= $rtoi(($realtime - beacon_on_at) / FRAME_T) - 1 && bc_err == 0)))
              $display("PASS: gwline_top_e2e_tb");
         else $display("FAIL: gwline_top_e2e_tb");
         $finish;

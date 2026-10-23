@@ -112,6 +112,7 @@ module gwline_top (
 
     wire        init_valid, close_valid, get_status_valid, blit_valid;
     wire        get_features_valid, get_switchres_valid, switchres_valid, session_active;
+    wire        beacon_valid, beacon_en;
     wire [7:0]  i_lz4, i_sr, i_sc, i_rgb;
     wire [31:0] blit_frame;  wire [15:0] blit_vsync;
     wire [63:0] sr_pclk;
@@ -127,6 +128,7 @@ module gwline_top (
         .switchres_valid(switchres_valid), .audio_valid(), .get_status_valid(get_status_valid),
         .blit_valid(blit_valid), .get_version_valid(),
         .get_features_valid(get_features_valid), .get_switchres_valid(get_switchres_valid),
+        .beacon_valid(beacon_valid), .beacon_en(beacon_en),
         .init_lz4(i_lz4), .init_sound_rate(i_sr), .init_sound_chan(i_sc), .init_rgb_mode(i_rgb),
         .sr_pclk(sr_pclk), .sr_h_active(sr_ha), .sr_h_begin(sr_hb), .sr_h_end(sr_he), .sr_h_total(sr_ht),
         .sr_v_active(sr_va), .sr_v_begin(sr_vb), .sr_v_end(sr_ve), .sr_v_total(sr_vt), .sr_interlace(),
@@ -191,12 +193,14 @@ module gwline_top (
     wire [31:0] dst_ip   = DEBUG_FIXED_DEST ? {8'd192,8'd168,8'd15,8'd15} : req_ip;
     wire [15:0] dst_port = DEBUG_FIXED_DEST ? 16'd32101                    : req_port;
     wire        dst_valid = (dst_ip != 32'd0);
+    wire        bc_valid, bc_last, bc_ready;  wire [7:0] bc_data;   // raster beacon (below)
     groovy_tx_arbiter u_arb (
         .clk(clk50m), .rst(core_rst),
         .req_ip(dst_ip), .req_port(dst_port), .our_port(OUR_PORT), .req_valid(dst_valid),
         .ack_valid(ack_valid), .ack_data(ack_data), .ack_last(ack_last), .ack_ready(ack_ready),
         .ft_valid(ft_valid), .ft_data(ft_data), .ft_last(ft_last), .ft_ready(ft_ready),
         .sr_valid(sr_v), .sr_data(sr_d), .sr_last(sr_l), .sr_ready(sr_rdy),
+        .bc_valid(bc_valid), .bc_data(bc_data), .bc_last(bc_last), .bc_ready(bc_ready),
         .tx_ip(tx_ip), .tx_src_port(tx_src_port), .tx_dst_port(tx_dst_port),
         .tx_data(tx_data), .tx_data_av(tx_data_av), .tx_req(tx_req),
         .tx_req_rdy(tx_req_rdy), .tx_data_rdy(tx_data_rdy)
@@ -305,6 +309,29 @@ module gwline_top (
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) vframe_cnt <= 16'd0;
         else if (vframe_pulse_50 && vframe_cnt != 16'hFFFF) vframe_cnt <= vframe_cnt + 16'd1;
+
+    // RASTER BEACON (CMD_SET_BEACON, opt-in): one datagram per video frame, pushed when
+    // the raster enters vertical blanking (source line SRC_H), so the host phase-locks on
+    // arrival times instead of polling - see groovy_beacon_sender.v. Off after reset and
+    // after CMD_CLOSE; stock GroovyMAME never enables it, so it never sees one.
+    logic beacon_on;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst)          beacon_on <= 1'b0;
+        else if (close_valid)  beacon_on <= 1'b0;
+        else if (beacon_valid) beacon_on <= beacon_en;
+    logic [15:0] vcount_50_q;
+    always_ff @(posedge clk50m) vcount_50_q <= vcount_50;
+    wire beacon_fire = beacon_on && (vcount_50 == SRC_H) && (vcount_50_q != SRC_H);
+    // free-running video frame counter for the beacon (vframe_cnt saturates for the UART)
+    logic [31:0] vframe_32;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) vframe_32 <= 32'd0; else if (vframe_pulse_50) vframe_32 <= vframe_32 + 32'd1;
+    groovy_beacon_sender u_beacon (
+        .clk(clk50m), .rst(core_rst), .trigger(beacon_fire),
+        .video_frame(vframe_32), .raster_line(vcount_50),
+        .good_lines({6'd0, gl_50}), .lead_top(lead_top), .status_bits(beamrace_status),
+        .out_valid(bc_valid), .out_data(bc_data), .out_last(bc_last),
+        .out_ready(bc_ready), .busy());
 
     // udp.sv's own RX-FIFO admission rejects (clk50m, same domain)
     logic [15:0] rj_cnt;
