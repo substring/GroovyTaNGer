@@ -308,6 +308,53 @@ def gen_anim_frames(w, h, kind, image=None):
     return frames
 
 
+class VideoFrames:
+    """Frames of a video file for blitrace --video, decoded by ffmpeg straight to w x h
+    RGB565 little-endian at the stream's frame rate (cover + centre-crop, then fps), read
+    by a thread into a bounded queue so decoding never stalls the line pacing.
+    get() returns the next frame, or repeats the previous one if the decoder is late;
+    at the end of the file it starts again (loop)."""
+    def __init__(self, path, w, h, fps):
+        import queue, subprocess, threading
+        self.path, self.w, self.h, self.fps = path, w, h, fps
+        self.size = w * h * 2
+        self.q = queue.Queue(maxsize=240)                  # ~4 s ahead at 60 fps
+        self.last = bytes(self.size)
+        self.late = 0; self.loops = 0; self.stop = False
+        self._sp = subprocess
+        self.t = threading.Thread(target=self._run, daemon=True)
+        self.t.start()
+
+    def _cmd(self):
+        vf = (f"scale={self.w}:{self.h}:force_original_aspect_ratio=increase,"
+              f"crop={self.w}:{self.h},fps={self.fps}")
+        return ["ffmpeg", "-loglevel", "error", "-i", self.path, "-vf", vf,
+                "-f", "rawvideo", "-pix_fmt", "rgb565le", "-"]
+
+    def _run(self):
+        while not self.stop:
+            p = self._sp.Popen(self._cmd(), stdout=self._sp.PIPE)
+            while not self.stop:
+                buf = p.stdout.read(self.size)
+                if len(buf) < self.size:
+                    break
+                self.q.put(buf)
+            p.kill()
+            self.loops += 1
+
+    def prefill(self, n, timeout=10.0):
+        t_end = time.perf_counter() + timeout
+        while self.q.qsize() < n and time.perf_counter() < t_end:
+            time.sleep(0.01)
+
+    def get(self):
+        try:
+            self.last = self.q.get_nowait()
+        except Exception:
+            self.late += 1                                 # decoder behind: show it again
+        return self.last
+
+
 CMD_SET_BEACON = 11      # Groovy_Tang extension: {11, enable} -> 16-byte "GTB1" raster beacons
 SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)   # Linux; Python does not export it
 
@@ -401,10 +448,17 @@ def send_blitrace(sock, addr, args):
         w, h = args.width, args.height
         frame = {"bars": gen_bars, "hbars": gen_hbars,
                  "gradient": gen_frame}[args.pattern](w, h)
-        print(f"pattern: {args.pattern} {w}x{h}")
+        if not (args.anim or args.video):
+            print(f"pattern: {args.pattern} {w}x{h}")
 
     frames_loop = None
-    if args.anim:
+    video = None
+    if args.video:
+        video = VideoFrames(args.video, w, h, round(args.refresh))
+        video.prefill(120)
+        print(f"video: {args.video} -> {w}x{h} RGB565 at {round(args.refresh)} fps "
+              f"(ffmpeg, cover + centre-crop), {video.q.qsize()} frames buffered")
+    elif args.anim:
         t = time.perf_counter()
         frames_loop = gen_anim_frames(w, h, args.anim, args.image)
         print(f"animation: {args.anim}{' ' + args.image if args.image else ''}, "
@@ -469,10 +523,11 @@ def send_blitrace(sock, addr, args):
     if t_vsync is None:
         print("(no vCount lock, falling back to free-run pacing)")
         t_vsync = time.perf_counter()
-    else:
+    elif bclk is None:
         print(f"phase lock: next FPGA vsync in {(t_vsync-time.perf_counter())*1e3:.2f}ms")
+    lock = "FPGA raster beacons" if bclk is not None else f"polled vCount, resync {args.resync_hz}Hz"
     print(f"pacing: {args.pace}, line_period={line_period*1e6:.1f}us {lpd} line/dgram, "
-          f"lead {args.lead} lines, phase-locked to FPGA raster, resync {args.resync_hz}Hz")
+          f"lead {args.lead} lines, phase-locked to the FPGA raster ({lock})")
     if args.frames < 30:
         print("NOTE: a line ring holds 32 lines, not a picture - it only shows something "
               "while frames keep coming. Use --frames 600 or more to judge the result.")
@@ -481,66 +536,78 @@ def send_blitrace(sock, addr, args):
     resync_period = 1.0 / args.resync_hz if args.resync_hz > 0 else 1e18
     next_resync = time.perf_counter() + resync_period
     lead_t = args.lead * raster_line                      # writer runs this far AHEAD
-    for f in range(frames):
-        # each frame targets a vsync instant; advance t_vsync one frame at a time.
-        # The writer must LEAD the raster by `lead` lines (not be synchronous with it -
-        # synchronous = writer overwrites the line the reader is reading right now, so the
-        # reader only ever sees a tiny stale window = the ~17-line repeat we saw). So start
-        # streaming lead_t BEFORE the vsync: line 0 lands while the raster is still in the
-        # previous frame's blanking, and stays `lead` lines ahead throughout.
-        t_start = t_vsync - lead_t
-        # if t_start is already in the past (startup / after a resync jump), don't blast -
-        # snap the schedule forward to now so we keep the per-line cadence.
-        now = time.perf_counter()
-        if t_start < now:
-            t_start = now
-        if frames_loop is not None:
-            frame = frames_loop[f % len(frames_loop)]
-        _pace_until(t_start - args.header_gap)
-        sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, f + 1, 0, args.vsync), addr)
-        # stream the h lines timed so line L lands ~lead lines before the raster reaches L.
-        t_line = t_start
-        sent = 0
-        while sent < h:
-            n = min(lpd, h - sent)
-            off = sent * line_bytes
-            try:
-                sock.sendto(frame[off:off + n * line_bytes], addr)
-            except OSError:
-                pass                                       # kernel TX buffer full; skip
-            sent += n
-            t_line += period
-            _pace_until(t_line)
-        t_vsync += frame_period                           # next frame's vsync (predicted)
+    sent_frames = 0
+    try:                                                  # Ctrl+C still prints the summary
+        for f in range(frames):
+            # each frame targets a vsync instant; advance t_vsync one frame at a time.
+            # The writer must LEAD the raster by `lead` lines (not be synchronous with it -
+            # synchronous = writer overwrites the line the reader is reading right now, so the
+            # reader only ever sees a tiny stale window = the ~17-line repeat we saw). So start
+            # streaming lead_t BEFORE the vsync: line 0 lands while the raster is still in the
+            # previous frame's blanking, and stays `lead` lines ahead throughout.
+            t_start = t_vsync - lead_t
+            # if t_start is already in the past (startup / after a resync jump), don't blast -
+            # snap the schedule forward to now so we keep the per-line cadence.
+            now = time.perf_counter()
+            if t_start < now:
+                t_start = now
+            if video is not None:
+                frame = video.get()
+            elif frames_loop is not None:
+                frame = frames_loop[f % len(frames_loop)]
+            _pace_until(t_start - args.header_gap)
+            sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, f + 1, 0, args.vsync), addr)
+            # stream the h lines timed so line L lands ~lead lines before the raster reaches L.
+            t_line = t_start
+            sent = 0
+            while sent < h:
+                n = min(lpd, h - sent)
+                off = sent * line_bytes
+                try:
+                    sock.sendto(frame[off:off + n * line_bytes], addr)
+                except OSError:
+                    pass                                       # kernel TX buffer full; skip
+                sent += n
+                t_line += period
+                _pace_until(t_line)
+            t_vsync += frame_period                           # next frame's vsync (predicted)
+            sent_frames = f + 1
 
-        # --- BEACON: the FPGA pushed its raster phase; align the next vsync on it ---
-        if bclk is not None:
-            if bclk.poll():
-                k = round((t_vsync - bclk.last_vsync) / frame_period)
-                corrected = bclk.last_vsync + k * frame_period
+            # --- BEACON: the FPGA pushed its raster phase; align the next vsync on it ---
+            if bclk is not None:
+                if bclk.poll():
+                    k = round((t_vsync - bclk.last_vsync) / frame_period)
+                    corrected = bclk.last_vsync + k * frame_period
+                    if args.verbose and f % 60 == 0:
+                        print(f"beacon @f{f+1}: phase error {(corrected - t_vsync)*1e6:+.1f}us")
+                    t_vsync = corrected
                 if args.verbose and f % 60 == 0:
-                    print(f"beacon @f{f+1}: phase error {(corrected - t_vsync)*1e6:+.1f}us")
-                t_vsync = corrected
+                    print(f"frame {f+1}")
+                continue
+            # --- LOOSE RESYNC (~resync_hz): re-read vCount between frames, correct t_vsync ---
+            # We're now in the inter-frame gap (blitting just fell). Poll the true raster line
+            # and nudge t_vsync toward it, absorbing the PC<->FPGA clock drift.
+            if time.perf_counter() >= next_resync:
+                nv = next_vsync()
+                if nv is not None:
+                    # snap t_vsync to the nearest predicted vsync consistent with nv
+                    k = round((nv - t_vsync) / frame_period)
+                    corrected = nv - k * frame_period
+                    drift_us = (corrected - t_vsync) * 1e6
+                    t_vsync = corrected
+                    if args.verbose:
+                        print(f"resync @f{f+1}: drift {drift_us:+.1f}us corrected")
+                next_resync = time.perf_counter() + resync_period
             if args.verbose and f % 60 == 0:
                 print(f"frame {f+1}")
-            continue
-        # --- LOOSE RESYNC (~resync_hz): re-read vCount between frames, correct t_vsync ---
-        # We're now in the inter-frame gap (blitting just fell). Poll the true raster line
-        # and nudge t_vsync toward it, absorbing the PC<->FPGA clock drift.
-        if time.perf_counter() >= next_resync:
-            nv = next_vsync()
-            if nv is not None:
-                # snap t_vsync to the nearest predicted vsync consistent with nv
-                k = round((nv - t_vsync) / frame_period)
-                corrected = nv - k * frame_period
-                drift_us = (corrected - t_vsync) * 1e6
-                t_vsync = corrected
-                if args.verbose:
-                    print(f"resync @f{f+1}: drift {drift_us:+.1f}us corrected")
-            next_resync = time.perf_counter() + resync_period
-        if args.verbose and f % 60 == 0:
-            print(f"frame {f+1}")
+    except KeyboardInterrupt:
+        print("\n(interrupted)")
+    frames = sent_frames
     print(f"blitrace: {frames} frame(s) {w}x{h}, phase-locked -> {addr[0]}:{addr[1]}")
+    if video is not None:
+        video.stop = True
+        print(f"video: decoder late on {video.late} frame(s) (previous frame repeated), "
+              f"{video.loops} pass(es) over the file")
     if bclk is not None:
         time.sleep(0.05); bclk.poll()
         print(bclk.summary(skip=3))
@@ -701,6 +768,9 @@ def main():
                     help="stream a precomputed animation instead of a still: background "
                          "scrolling 2 px/frame + a moving vertical bar + a band moving down "
                          "1 line/frame (scroll uses --image if given)")
+    br.add_argument("--video", default=None,
+                    help="stream a video file (any format ffmpeg reads), scaled + cropped to "
+                         "--width x --height at --refresh fps, looping at the end")
     br.add_argument("--image", default=None,
                     help="picture for --anim scroll, fitted (cover + centre-crop) to "
                          "--width x --height without switchres")
