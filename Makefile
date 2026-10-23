@@ -1,5 +1,5 @@
 # Groovy_Tang simulation build
-# Requires Icarus Verilog (iverilog/vvp). No vendor toolchain needed.
+# Requires Icarus Verilog (iverilog/vvp) and Verilator. No vendor toolchain needed.
 #
 #   make test                       run all self-checking testbenches
 #   make <tbname>                   run one testbench (e.g. make groovy_pll_solver_tb)
@@ -22,11 +22,19 @@ LIBDIRS := -y rtl/core \
            -y rtl/board/tang_primer_20k/bringup
 IFLAGS := -g2012 -Wall $(LIBDIRS)
 
-TESTS := $(notdir $(basename $(wildcard $(TB_DIR)/*_tb.v)))
+# Benches that instantiate the vendored udp.sv: it uses SystemVerilog interfaces
+# (rmii.svh) that Icarus cannot parse, so they are built with Verilator instead.
+VERILATOR ?= verilator
+VFLAGS    := --binary --timing --bbox-unsup -Wno-fatal -Wno-lint -Wno-style \
+             -Irtl/vendor/sipeed_udp
+UDP_TESTS := udp_ifg_sweep_tb groovy_udpstress_udpsv_realframe_tb
 
-.PHONY: test clean wave $(TESTS)
+ALL_TESTS := $(notdir $(basename $(wildcard $(TB_DIR)/*_tb.v)))
+TESTS     := $(filter-out $(UDP_TESTS),$(ALL_TESTS))
 
-test: $(TESTS)
+.PHONY: test clean wave $(TESTS) $(UDP_TESTS)
+
+test: $(TESTS) $(UDP_TESTS)
 	@echo "================================================"
 	@echo "All testbenches completed."
 
@@ -34,6 +42,13 @@ $(TESTS): %: | $(BUILD)
 	@echo "== build+run $@ =="
 	@$(IVERILOG) $(IFLAGS) -o $(BUILD)/$@.vvp -s $@ $(TB_DIR)/$@.v
 	@$(VVP) $(BUILD)/$@.vvp
+
+$(UDP_TESTS): %: | $(BUILD)
+	@echo "== build+run $@ (verilator) =="
+	@$(VERILATOR) $(VFLAGS) --top-module $@ -Mdir $(BUILD)/obj_$@ -o $@ \
+	    $(TB_DIR)/$@.v rtl/vendor/sipeed_udp/udp.sv > $(BUILD)/$@.vbuild.log 2>&1 \
+	    || (cat $(BUILD)/$@.vbuild.log; exit 1)
+	@$(BUILD)/obj_$@/$@
 
 wave: | $(BUILD)
 	@test -n "$(TB)" || (echo "usage: make wave TB=<tbname>"; exit 1)

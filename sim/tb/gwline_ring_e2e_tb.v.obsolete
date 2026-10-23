@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+// OBSOLETE (2026-10-23): superseded by sim/tb/gwline_top_e2e_tb.sv, which instantiates
+// the real gwline_top instead of copying its glue by hand. This copy drifted from the
+// top (it still wires the pre-groovy_linering lineram_wr/lineram_scan chain) and reads
+// its stimulus from a deleted session scratchpad. Kept for reference only; renamed so
+// make test no longer picks it up.
 // Groovy_Tang - end-to-end ring buffer test with a REAL udp.sv instance driven over its
 // actual RMII input (byte-exact Ethernet frames, real checksums/FCS), through the real
 // groovy_packet_parser -> groovy_blit_rx -> groovy_sync_fifo -> groovy_lineram_wr ->
