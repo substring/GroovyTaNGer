@@ -137,6 +137,35 @@ so this stays backward-compatible.
 - HW: run the soak with CRC verify; report `bad/checked` over UART. Any future DDR3
   deskew fix is confirmed iff `crc_lines_bad == 0`.
 
+## CMD_SET_BEACON (command 11) — implemented (gwline)
+
+`[0]=11 [1]=enable`. While enabled, the receiver pushes one 16-byte datagram per video
+frame when the raster enters vertical blanking, instead of being polled:
+
+```
+off 0  "GTB1"        off 4  uint32 video_frame   off 8  uint16 raster_line
+off 10 uint16 good_lines (valid output lines of the last frame)
+off 12 uint16 lead_top   (writer line when the raster crossed source line 0)
+off 14 uint8  status     off 15 uint8 seq (wraps; gaps = lost beacons)
+```
+Off after reset and after CMD_CLOSE, so a v1 client never receives one. The host takes
+the KERNEL receive timestamp of each beacon as its raster phase reference
+(`tools/gm_test_sender.py blitrace --beacon`; HW: phase error within a few us).
+RTL: `rtl/core/groovy_beacon_sender.v`.
+
+## Audio outputs — planned (not implemented)
+
+Noted 2026-10-24. The receiver should:
+1. **Advertise** the audio outputs it has, and which one is the **default**, e.g. in the
+   `CMD_GET_FEATURES` reply's reserved bytes (a bitfield of outputs + a default index):
+   - **HDMI** (audio in the TMDS stream: needs an HDMI encoder with data islands; the
+     current Gowin DVI_TX is DVI only),
+   - **jack** (the Dock's 3.5 mm output; driver chip to be checked on the schematic).
+2. **Let the client select** the output (new command, or a field of an extended
+   CMD_INIT), falling back to the default when the client does not ask - a v1 client
+   never asks, so it gets the default.
+The audio data itself stays the v1 transport (CMD_INIT soundRate/chan + CMD_AUDIO).
+
 ## Future
 This is the negotiation hook for V2+: new compression bits (RLE/QOI), new RGB
 modes, integrity hashes (above), or capability flags (interlaced, audio, max
