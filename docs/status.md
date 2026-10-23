@@ -1,0 +1,60 @@
+# Groovy_Tang — status and resume point (2026-10-24)
+
+Branch: `ddr3-audit` (not pushed). Everything below is committed.
+
+## What works on the board
+
+**Beam-race video over the network, BRAM line ring (`gwline`)**: a real game video
+(640x480 59.94 fps capture) plays from the PC to the HDMI screen line by line, ~14 source
+lines ahead of the raster, with no frame buffer: smooth, no visible glitch. 10-minute runs
+hold the lock (LT=14) with no drift.
+
+- Ring: `rtl/core/groovy_linering.v` (writer never waits, free-running raster, per-slot
+  line tags). Network: `udp.sv` fixes (back-to-back frames, header-FIFO reject test,
+  TX framing race, 1 ms TX hold-off), `groovy_udp_rx_framer.v`, `groovy_tx_arbiter.v`.
+- **Raster beacon** (protocol extension `CMD_SET_BEACON`, code 11, opt-in): the FPGA pushes
+  its raster phase once per video frame; the sender locks on the kernel receive timestamp
+  (phase error a few us). See `docs/protocol_v2_features.md`.
+
+## How to run it again
+
+```bash
+sudo ip addr add 192.168.15.15/24 dev enp6s0        # PC on the board's subnet (temporary)
+openFPGALoader -b tangprimer20k rtl/board/tang_primer_20k/gwline/impl/pnr/gwline.fs
+python3 tools/gm_test_sender.py --host 192.168.15.14 blitrace --video video.mp4 --frames 3600 --beacon
+```
+Build first if `impl/` is empty: `tools/gw_build.sh rtl/board/tang_primer_20k/gwline/gwline.gprj`
+(retry on "License verification failed"). Other sources: `--anim scroll --image <png>`,
+`--anim bars`, `--pattern hbars`. Ctrl+C prints the summary. A line ring shows nothing once
+the stream stops: a blank screen at the end is normal. Debug UART: `/dev/ttyUSB1` 115200
+(`GL=02D0` = all 720 lines valid, `LT` = writer lead, `TO`/`RJ` must stay 0). If the board
+stops answering, button S0 resets it without reflashing.
+
+## Tests
+
+- `make test`: all benches pass.
+- Full-top end-to-end benches (Verilator, real tops + real `udp.sv` over RMII):
+  `sim/tb/gwline_top_e2e_tb.sv` (pixel-exact output, RMII TX decoder checking every frame
+  the FPGA sends, beacons) and `sim/tb/gwddr3net_top_e2e_tb.sv`. Streams come from
+  `tools/gen_gwline_stream.py` (`--beacon`, `--status-burst N`).
+
+## Open, in the order agreed with the user
+
+1. **Audio through the Dock's 3.5 mm jack — priority.** Protocol already carries audio
+   (CMD_INIT soundRate/chan + CMD_AUDIO). First step: find the jack's driver chip on the
+   Dock schematic.
+2. **Conformance with the original Groovy_MiSTer protocol** before plugging GroovyMAME in:
+   re-check `docs/protocol_verified.md` against what the FPGA does now (known gap: the ACK
+   always reports `fpga frame=0`).
+3. **Isolated short frames**: ~1 frame in 2000-3600 with a few lines missing mid-stream
+   (invisible; likely one lost pixel datagram). Not investigated.
+4. **HDMI audio**: add an open HDMI encoder (data islands) **next to** the Gowin DVI_TX,
+   both kept and selectable; then advertise/select the audio output (HDMI or jack, with a
+   default) in protocol v2 (planned in `docs/protocol_v2_features.md`).
+
+## Parked
+
+**DDR3 full-frame path (`gwddr3net`)**: the network -> DDR3 -> HDMI path is bit-exact (port
+rework `groovy_gwddr3_port.v`), but whenever the DDR3 controller runs the HDMI output shows
+crawling wrong pixels on some colours. Full investigation and next ideas:
+`docs/hdmi_ddr3_interference.md`.
