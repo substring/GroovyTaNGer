@@ -100,8 +100,13 @@ module groovy_linebuf_reader #(
 
     reg [7:0] vrep_cnt = 8'd0;
     wire      last_rep = (vrep_cnt == V_REPL[7:0] - 8'd1);
+    // Both counters restart at VBLANK START (fetch_fs), not at frame_start: frame_start is
+    // registered and arrives WITH the first active pixel, so restarting on it left that
+    // pixel looking for line v_active, matching no buffer -> the old 1-pixel top-left
+    // defect (the previous frame's last held pixel). With fetch_fs tied to frame_start
+    // the behaviour is the old one.
     always @(posedge pix_clk) begin
-        if (pix_rst || frame_start) vrep_cnt <= 8'd0;
+        if (pix_rst || fetch_fs || frame_start) vrep_cnt <= 8'd0;
         else if (de_fell)           vrep_cnt <= last_rep ? 8'd0 : vrep_cnt + 8'd1;
     end
     wire src_de_fell = de_fell & last_rep;
@@ -115,7 +120,7 @@ module groovy_linebuf_reader #(
     // line they label). disp_line = the source line being displayed.
     reg [15:0] disp_line = 16'd0;
     always @(posedge pix_clk) begin
-        if (pix_rst || frame_start) disp_line <= 16'd0;
+        if (pix_rst || fetch_fs || frame_start) disp_line <= 16'd0;
         else if (src_de_fell)       disp_line <= disp_line + 16'd1;
     end
 
@@ -328,9 +333,15 @@ module groovy_linebuf_reader #(
             end
         endcase
 
+        // Released mid-frame (first frame landed while the beam is low on the screen):
+        // start at the source line being displayed (= lines consumed so far; 0 during
+        // vblank) instead of line 0, or the fetch spends the first lines catching up
+        // and those show the held pixel. A fetch is far shorter than a line, so the
+        // current line costs nothing. Buffers are picked by tag, so fill_idx need not
+        // equal next_line % 3.
         if (pclk_rst) begin
             fstate <= FIDLE; sub <= 3'd0; rd <= 1'b0; lb_we <= 1'b0;
-            next_line <= 16'd0; fill_idx <= 2'd0;
+            next_line <= consumed_s; fill_idx <= 2'd0;
         end
     end
 endmodule
