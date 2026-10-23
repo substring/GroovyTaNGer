@@ -408,9 +408,24 @@ module gwddr3net_top (
     // =========================================================================
     // RGB565 -> RGB888 + DVI_TX
     // =========================================================================
-    wire [4:0] r5 = pix565[15:11];
-    wire [5:0] g6 = pix565[10:5];
-    wire [4:0] b5 = pix565[4:0];
+    // HDMI_SELFTEST=1 feeds the encoder a logic-generated picture (the hdmi_probe_top
+    // grey ramp + two colour patches) instead of the reader, everything else running:
+    // separates "the rest of the design disturbs HDMI" from "the reader's pixels do".
+    localparam HDMI_SELFTEST = 1'b0;
+    wire [8:0]  st_sx   = hcount[10:2];
+    wire [16:0] st_prod = st_sx * 8'd205;
+    wire [7:0]  st_v    = st_prod[15:8];
+    reg  [15:0] st_p1, st_p2;
+    always @(posedge pix_clk) begin                       // 2 stages = the reader's latency
+        if (vcount < 16'd480)       st_p1 <= {st_v[7:3], st_v[7:2], st_v[7:3]};
+        else if (hcount < 16'd640)  st_p1 <= 16'h9011;
+        else                        st_p1 <= 16'h99F3;
+        st_p2 <= st_p1;
+    end
+    wire [15:0] dvi565 = HDMI_SELFTEST ? st_p2 : pix565;
+    wire [4:0] r5 = dvi565[15:11];
+    wire [5:0] g6 = dvi565[10:5];
+    wire [4:0] b5 = dvi565[4:0];
     wire [7:0] r8 = {r5, r5[4:2]};
     wire [7:0] g8 = {g6, g6[5:4]};
     wire [7:0] b8 = {b5, b5[4:2]};
@@ -429,6 +444,7 @@ module gwddr3net_top (
     //   RD=frames received  DP=dropped pixels (FIFO full)  HF=have_frame
     //   NL=max source line fetched last frame (~00F0=240 = fetch keeps up)
     //   RY=udp ready  SE=rx_seen  CO=max fetch column (~0140=320)
+    //   FD/SD/FK/SK = frame-stability probes (below)  PW=longest DDR3 port wait, cycles
     // =========================================================================
     reg [15:0] nl_max=0, nl_hold=0; reg vs_e=0;
     always @(posedge pix_clk) begin
@@ -439,22 +455,47 @@ module gwddr3net_top (
     reg [15:0] co_max=0;
     always @(posedge pclk) if (dbg_col > co_max) co_max <= dbg_col;
 
+    // Static-picture stability probes: an order-dependent checksum (ck*33 + word: an XOR sum cancels on
+    // XOR-structured test patterns, and a rotate-by-1 repeats every 32 words) of every frame at two
+    // points, and how many frames differed from the one before. With a static picture
+    // both DIFF counters must stand still; whichever moves locates a flicker.
+    //   FK/FD = the words the reader fetched from DDR3 into its line buffers (pclk)
+    //   SK/SD = the pixels handed to the DVI encoder during active video (pix_clk)
+    reg [31:0] fck=0, fck_prev=0; reg [15:0] fdiff=0, fe_q=0;
+    always @(posedge pclk) begin
+        fe_q <= dbg_fe;
+        if (dbg_fe != fe_q) begin
+            if (fck != fck_prev) fdiff <= fdiff + 16'd1;
+            fck_prev <= fck;  fck <= 32'd0;
+        end else if (dbg_lbwe) fck <= {fck[26:0], 5'd0} + fck + {16'd0, dbg_lbdata};
+    end
+    reg [31:0] sck=0, sck_prev=0; reg [15:0] sdiff=0;
+    always @(posedge pix_clk) begin
+        if (frame_start) begin
+            if (sck != sck_prev) sdiff <= sdiff + 16'd1;
+            sck_prev <= sck;  sck <= 32'd0;
+        end else if (de_o) sck <= {sck[26:0], 5'd0} + sck + {16'd0, pix565};
+    end
+
     // count received frames (clk50m) -> sys_clk
     logic [15:0] frame_cnt;
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) frame_cnt <= 16'd0; else if (frame_done) frame_cnt <= frame_cnt + 16'd1;
 
     reg [15:0] q_fc, q_dp, q_nl, q_co; reg q_hf, q_ry, q_se;
+    reg [15:0] q_fd, q_sd, q_fk, q_sk, q_pw;
     always @(posedge sys_clk) begin
         q_fc<=frame_cnt; q_dp<=drop_cnt; q_nl<=nl_hold; q_co<=co_max;
         q_hf<=have_frame; q_ry<=ready; q_se<=rx_seen;
+        q_fd<=fdiff; q_sd<=sdiff; q_fk<=fck_prev[15:0]^fck_prev[31:16];
+        q_sk<=sck_prev[15:0]^sck_prev[31:16]; q_pw<=port_wait_max;
     end
 
     wire [7:0] tx_din; wire tx_wr, tx_busy;
     uart_tx_V2 #(.clk_freq(27_000_000), .uart_freq(115200)) u_dbgtx (
         .clk(sys_clk), .din(tx_din), .wr_en(tx_wr), .tx_busy(tx_busy), .tx_p(uart_txp));
     function [7:0] hxd; input [3:0] n; hxd = (n<4'd10)?(8'h30+n):(8'h41+n-4'd10); endfunction
-    localparam [7:0] DBGLEN = 8'd60;
+    localparam [7:0] DBGLEN = 8'd90;
     reg [7:0] di=0; reg [7:0] dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0;
     reg [7:0] dlb;
     always @(*) begin
@@ -469,8 +510,18 @@ module gwddr3net_top (
             29:dlb="C";30:dlb="O";31:dlb="=";
             32:dlb=hxd(q_co[15:12]);33:dlb=hxd(q_co[11:8]);34:dlb=hxd(q_co[7:4]);35:dlb=hxd(q_co[3:0]);36:dlb=" ";
             37:dlb="R";38:dlb="Y";39:dlb="=";40:dlb=hxd({3'b0,q_ry});41:dlb=" ";
-            42:dlb="S";43:dlb="E";44:dlb="=";45:dlb=hxd({3'b0,q_se});
-            58:dlb=8'h0D;59:dlb=8'h0A;default:dlb=" ";
+            42:dlb="S";43:dlb="E";44:dlb="=";45:dlb=hxd({3'b0,q_se});46:dlb=" ";
+            47:dlb="F";48:dlb="D";49:dlb="=";
+            50:dlb=hxd(q_fd[15:12]);51:dlb=hxd(q_fd[11:8]);52:dlb=hxd(q_fd[7:4]);53:dlb=hxd(q_fd[3:0]);54:dlb=" ";
+            55:dlb="S";56:dlb="D";57:dlb="=";
+            58:dlb=hxd(q_sd[15:12]);59:dlb=hxd(q_sd[11:8]);60:dlb=hxd(q_sd[7:4]);61:dlb=hxd(q_sd[3:0]);62:dlb=" ";
+            63:dlb="F";64:dlb="K";65:dlb="=";
+            66:dlb=hxd(q_fk[15:12]);67:dlb=hxd(q_fk[11:8]);68:dlb=hxd(q_fk[7:4]);69:dlb=hxd(q_fk[3:0]);70:dlb=" ";
+            71:dlb="S";72:dlb="K";73:dlb="=";
+            74:dlb=hxd(q_sk[15:12]);75:dlb=hxd(q_sk[11:8]);76:dlb=hxd(q_sk[7:4]);77:dlb=hxd(q_sk[3:0]);78:dlb=" ";
+            79:dlb="P";80:dlb="W";81:dlb="=";
+            82:dlb=hxd(q_pw[15:12]);83:dlb=hxd(q_pw[11:8]);84:dlb=hxd(q_pw[7:4]);85:dlb=hxd(q_pw[3:0]);
+            88:dlb=8'h0D;89:dlb=8'h0A;default:dlb=" ";
         endcase
     end
     always @(posedge sys_clk) begin

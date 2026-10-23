@@ -190,6 +190,10 @@ module gwddr3net_top_e2e_tb;
     end
     integer j;
 `ifdef SHOW_DBG
+    // the top's static-picture stability probes (UART FD/SD), once per video frame
+    always @(posedge pclk) if (dut.frame_start)
+        $display("%t STAB vframe %0d RD=%0d FD=%0d SD=%0d FK=%h SK=%h PW=%0d", $time, vframe,
+                 dut.frame_cnt, dut.fdiff, dut.sdiff, dut.fck_prev, dut.sck_prev, dut.port_wait_max);
     // first mismatching pixel of each line, against the newest frame received so far
     integer dbg_col, dbg_last, dbg_cnt, dbg_n = 0;  reg [15:0] dbg_got, dbg_want, dbg_line;
     always @(posedge pclk) begin
