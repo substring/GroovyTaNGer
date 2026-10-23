@@ -799,21 +799,30 @@ always_ff@(posedge clk50m or negedge phy_rdy)begin
                         arp_target_ip <= tx_head_data_o_port;
                         //tx_head_fifo_tail <= (tx_head_fifo_tail + 1)%128;
                         arp_rpy_stauts <= 2;
+                        // Groovy_Tang: the 1 ms hold-off is for the ARP REQUEST path only
+                        // (give the peer time to answer before retrying). The original set it
+                        // for every datagram, so each UDP send was followed by 1 ms of dead
+                        // TX: replies capped at ~1000/s and a reply queued behind another
+                        // one was delayed by up to 1 ms (HW: raster beacons arrived with
+                        // +-1 ms of jitter, which the host took for raster phase).
                         longdelay <= 50000;//1ms
                         if(tx_head_data_o_port == arp_ip_0 && arp_list[0])begin//对应arp0
                             tx_head_fifo_tail <= (tx_head_fifo_tail + 1)%16'd64;
                             arp_target_mac <= arp_mac_0;
                             arp_rpy_stauts <= 3;
+                            longdelay <= 0;
                         end
                         if(tx_head_data_o_port == arp_ip_1 && arp_list[1])begin//对应arp1
                             tx_head_fifo_tail <= (tx_head_fifo_tail + 1)%16'd64;
                             arp_target_mac <= arp_mac_1;
                             arp_rpy_stauts <= 3;
+                            longdelay <= 0;
                         end
                         if(tx_head_data_o_port == 32'hFFFFFFFF)begin//广播
                             tx_head_fifo_tail <= (tx_head_fifo_tail + 1)%16'd64;
                             arp_target_mac <= 48'hFFFFFFFFFFFF;
                             arp_rpy_stauts <= 3;
+                            longdelay <= 0;
                         end
                     end else begin //定时请求arp刷新
                         arp_refresh_cnt <= arp_refresh_cnt + 1;
