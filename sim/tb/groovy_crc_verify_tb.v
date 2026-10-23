@@ -4,7 +4,7 @@
 // word and confirm BAD increments. Mirrors the probe's S_WR/S_RD logic at small size.
 `timescale 1ns/1ps
 `default_nettype none
-module crcverify_tb;
+module groovy_crc_verify_tb;
     reg clk=0; always #5 clk=~clk;
     reg resetn=0;
 
@@ -91,6 +91,8 @@ module crcverify_tb;
         $display("INJECT@10: chk=%0d bad=%0d first=%0d (expect bad>0, first=1)", chk, bad, firstb);
         if (bad==0) $display("  *** FAIL: injected error not detected");
         else        $display("  OK: injected error detected, first bad line=%0d", firstb);
+        if (bad!=0 && firstb==1) $display("PASS: groovy_crc_verify_tb");
+        else                     $display("FAIL: groovy_crc_verify_tb");
         $finish;
     end
 endmodule
