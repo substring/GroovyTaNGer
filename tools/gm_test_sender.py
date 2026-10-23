@@ -274,6 +274,40 @@ def _read_ack_vcount(sock, addr):
     return vcount
 
 
+def gen_anim_frames(w, h, kind, image=None):
+    """Precomputed animation loop for blitrace --anim (numpy; ~1 s for 160 frames).
+
+    A line ring only shows what keeps coming, so motion is the real test:
+      - the background scrolls left 2 px per frame (an image fitted to w x h, or the
+        colour bars), wrapping: one loop = w/2 frames;
+      - a 6 px white vertical bar crosses the screen 4 px per frame;
+      - an 8-line yellow band moves DOWN one source line per frame: every line of the
+        picture changes over time, which a stuck or stale ring line would betray."""
+    import numpy as np
+    if kind == "scroll" and image:
+        from PIL import Image
+        im = Image.open(image).convert("RGB")
+        iw, ih = im.size
+        sc = max(w / iw, h / ih)                           # cover, then centre-crop
+        im = im.resize((max(w, round(iw * sc)), max(h, round(ih * sc))))
+        x0, y0 = (im.size[0] - w) // 2, (im.size[1] - h) // 2
+        rgb = np.asarray(im.crop((x0, y0, x0 + w, y0 + h)), dtype=np.uint16)
+        base = ((rgb[..., 0] >> 3) << 11) | ((rgb[..., 1] >> 2) << 5) | (rgb[..., 2] >> 3)
+    else:
+        bars = np.array(BAR_COLORS, dtype=np.uint16)
+        base = np.tile(bars[(np.arange(w) * len(bars)) // w], (h, 1))
+    n = w // 2
+    frames = []
+    for f in range(n):
+        fr = np.roll(base, -2 * f, axis=1).copy()
+        bx = (4 * f) % w
+        fr[:, bx:bx + 6] = 0xFFFF
+        by = f % h
+        fr[by:by + 8, :] = 0xFFE0
+        frames.append(fr.astype("<u2").tobytes())
+    return frames
+
+
 CMD_SET_BEACON = 11      # Groovy_Tang extension: {11, enable} -> 16-byte "GTB1" raster beacons
 SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)   # Linux; Python does not export it
 
@@ -369,6 +403,13 @@ def send_blitrace(sock, addr, args):
                  "gradient": gen_frame}[args.pattern](w, h)
         print(f"pattern: {args.pattern} {w}x{h}")
 
+    frames_loop = None
+    if args.anim:
+        t = time.perf_counter()
+        frames_loop = gen_anim_frames(w, h, args.anim, args.image)
+        print(f"animation: {args.anim}{' ' + args.image if args.image else ''}, "
+              f"{len(frames_loop)} frames precomputed in {time.perf_counter() - t:.1f}s")
+
     line_bytes = w * 2                                     # RGB565 = 2 B/px
     sock.settimeout(0.5)
     sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)   # rgb565
@@ -453,6 +494,8 @@ def send_blitrace(sock, addr, args):
         now = time.perf_counter()
         if t_start < now:
             t_start = now
+        if frames_loop is not None:
+            frame = frames_loop[f % len(frames_loop)]
         _pace_until(t_start - args.header_gap)
         sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, f + 1, 0, args.vsync), addr)
         # stream the h lines timed so line L lands ~lead lines before the raster reaches L.
@@ -654,6 +697,13 @@ def main():
     br.add_argument("--monitor", default="arcade_15")
     br.add_argument("--dotclock-min", dest="dotclock_min", type=float, default=25.0)
     br.add_argument("--verbose", action="store_true")
+    br.add_argument("--anim", choices=["scroll", "bars"], default=None,
+                    help="stream a precomputed animation instead of a still: background "
+                         "scrolling 2 px/frame + a moving vertical bar + a band moving down "
+                         "1 line/frame (scroll uses --image if given)")
+    br.add_argument("--image", default=None,
+                    help="picture for --anim scroll, fitted (cover + centre-crop) to "
+                         "--width x --height without switchres")
     br.add_argument("--beacon", action="store_true",
                     help="phase-lock on the FPGA's pushed raster beacons (CMD_SET_BEACON) "
                          "instead of polling CMD_GET_STATUS; prints per-frame picture health")
