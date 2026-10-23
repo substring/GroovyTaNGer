@@ -256,6 +256,13 @@ def _read_ack_vcount(sock, addr):
     """Poll CMD_GET_STATUS and return the FPGA's live raster source line (vCount), or None
     on timeout / bad reply. Only valid BETWEEN blits (while blitting, the FPGA eats every
     datagram as pixel data and won't answer). This is the phase-lock feedback."""
+    # The FPGA also ACKs every BLIT header. Those replies have the same 13-byte format
+    # and queue up in the socket during a stream: without this drain the poll below read
+    # the ACK of the frame just sent, ~16 ms old, and every resync moved the schedule by
+    # ~1 ms the same way (HW: LT climbed ~16 lines per resync until the ring was lost).
+    while select.select([sock], [], [], 0)[0]:
+        try: sock.recv(64)
+        except OSError: break
     try:
         sock.sendto(struct.pack("<B", CMD_GET_STATUS), addr)
         data, _ = sock.recvfrom(64)
