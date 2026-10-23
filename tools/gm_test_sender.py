@@ -322,6 +322,7 @@ class VideoFrames:
         self.last = bytes(self.size)
         self.late = 0; self.loops = 0; self.stop = False
         self._sp = subprocess
+        self.proc = None
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
 
@@ -332,15 +333,30 @@ class VideoFrames:
                 "-f", "rawvideo", "-pix_fmt", "rgb565le", "-"]
 
     def _run(self):
+        import queue
         while not self.stop:
-            p = self._sp.Popen(self._cmd(), stdout=self._sp.PIPE)
+            p = self.proc = self._sp.Popen(self._cmd(), stdout=self._sp.PIPE,
+                                           stderr=self._sp.DEVNULL)
             while not self.stop:
                 buf = p.stdout.read(self.size)
                 if len(buf) < self.size:
                     break
-                self.q.put(buf)
-            p.kill()
-            self.loops += 1
+                while not self.stop:                       # never block forever on a full
+                    try:                                   # queue: close() must get through
+                        self.q.put(buf, timeout=0.1); break
+                    except queue.Full:
+                        pass
+            p.kill(); p.wait()
+            if not self.stop:
+                self.loops += 1
+
+    def close(self):
+        """Stop decoding: kill ffmpeg ourselves (closing its pipe under it made it print
+        'Broken pipe' errors at the end of every --video run)."""
+        self.stop = True
+        if self.proc is not None:
+            self.proc.kill()
+        self.t.join(timeout=2.0)
 
     def prefill(self, n, timeout=10.0):
         t_end = time.perf_counter() + timeout
@@ -456,6 +472,9 @@ def send_blitrace(sock, addr, args):
     if args.video:
         video = VideoFrames(args.video, w, h, round(args.refresh))
         video.prefill(120)
+        if video.q.qsize() == 0:
+            print(f"WARNING: ffmpeg decoded no frame from {args.video} (missing file or format "
+                  f"it cannot read? try: ffmpeg -i {args.video}) - black frames will be sent")
         print(f"video: {args.video} -> {w}x{h} RGB565 at {round(args.refresh)} fps "
               f"(ffmpeg, cover + centre-crop), {video.q.qsize()} frames buffered")
     elif args.anim:
@@ -605,9 +624,9 @@ def send_blitrace(sock, addr, args):
     frames = sent_frames
     print(f"blitrace: {frames} frame(s) {w}x{h}, phase-locked -> {addr[0]}:{addr[1]}")
     if video is not None:
-        video.stop = True
+        video.close()
         print(f"video: decoder late on {video.late} frame(s) (previous frame repeated), "
-              f"{video.loops} pass(es) over the file")
+              f"{video.loops} complete pass(es) over the file")
     if bclk is not None:
         time.sleep(0.05); bclk.poll()
         print(bclk.summary(skip=3))
