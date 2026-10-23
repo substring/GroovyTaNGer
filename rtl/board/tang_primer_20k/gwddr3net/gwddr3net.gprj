@@ -8,7 +8,7 @@
         <!-- DDR3 clocks + Gowin DDR3 IP (shared with gwddr3video; IP .v is gitignored) -->
         <File path="../gwddr3video/mem_pll.v" type="file.verilog" enable="1"/>
         <File path="../gwddr3video/ddr3_ip/ddr3_mi.v" type="file.verilog" enable="1"/>
-        <File path="../../../core/groovy_gwddr3_adapter.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_gwddr3_port.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_ddr3_writer.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_async_fifo.v" type="file.verilog" enable="1"/>
         <!-- Network stack (Sipeed udp + Groovy protocol cores) -->
@@ -25,6 +25,7 @@
         <File path="../../../core/groovy_pll_solver.v" type="file.verilog" enable="1"/>
         <File path="../../../generic/video/superres_factor.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_blit_rx.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_udp_rx_framer.v" type="file.verilog" enable="1"/>
         <!-- Video: timing gen, line-buffer scaler, DVI -->
         <File path="../../../vendor/nand2mario_ddr3/uart_tx_V2.v" type="file.verilog" enable="1"/>
         <File path="../../../vendor/gowin/rpll_tmds.v" type="file.verilog" enable="1"/>

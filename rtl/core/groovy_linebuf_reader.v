@@ -35,7 +35,15 @@ module groovy_linebuf_reader #(
     // repl is just the scanout column index = hcount / H_REPL. H_SH = log2(H_REPL).
     parameter integer H_REPL = 1,
     parameter integer V_REPL = 1,
-    parameter integer H_SH   = 0       // log2(H_REPL); 0 -> no horizontal scaling
+    parameter integer H_SH   = 0,      // log2(H_REPL); 0 -> no horizontal scaling
+    // Burst mode (SINGLE_WORD=0) word order inside dout128. 0 = the rotated order of the
+    // first (nand2mario) controller; 1 = plain, word k at bits [16k+15:16k], which is
+    // what the Gowin DDR3 IP returns. Burst mode needs h_active and base_addr to be
+    // multiples of 8 (every line starts on a beat).
+    parameter integer BURST_PLAIN = 0,
+    // FWAIT watchdog, pclk cycles. Must exceed the slowest legitimate read (the IP's
+    // latency plus a refresh plus one interleaved write when the port is shared).
+    parameter integer FWAIT_TIMEOUT = 60
 ) (
     // ---- pixel (scanout) domain ----
     input  wire              pix_clk,
@@ -170,7 +178,7 @@ module groovy_linebuf_reader #(
     // comes -> FWAIT hangs until frame_start resets it. Fix: if data_ready doesn't
     // arrive within WD_MAX cycles (a read is ~9 cyc; refresh+read ~ <40), assume the
     // rd was swallowed and RE-ISSUE the same read_ptr (col not advanced). Self-resyncs.
-    localparam [7:0] WD_MAX = 8'd60;
+    localparam [7:0] WD_MAX = FWAIT_TIMEOUT[7:0];
     reg [7:0]  wd;                  // FWAIT watchdog counter
 
     assign fetch_active = (fstate != FIDLE);
@@ -213,7 +221,8 @@ module groovy_linebuf_reader #(
     // HW-verified). Only used in burst mode (SINGLE_WORD=0).
     wire [2:0]  lane     = sub + 3'd4;
     wire [2:0]  lane_asc = 3'd7 - lane;
-    wire [15:0] word_sel = burst[ lane_asc*16 +: 16 ];
+    wire [15:0] word_sel = (BURST_PLAIN != 0) ? burst[ sub*16 +: 16 ]
+                                              : burst[ lane_asc*16 +: 16 ];
 
     // Credit-based pacing: keep the fetch >=1 and <=LEAD source lines ahead of the
     // beam (3 buffers, LEAD=2 -> the displayed buffer is never overwritten).

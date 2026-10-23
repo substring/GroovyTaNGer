@@ -91,7 +91,7 @@ module gwddr3net_top (
     logic        clk50m, ready;
     logic        rx_head_av;  logic [31:0] rx_head;
     logic        rx_data_av;  logic [7:0]  rx_data;
-    logic        rx_head_rdy;
+    wire         rx_head_rdy, rx_data_rdy;
 
     logic [31:0] tx_ip;   logic [15:0] tx_src_port, tx_dst_port;
     logic [7:0]  tx_data; logic        tx_data_av, tx_req;
@@ -107,30 +107,11 @@ module gwddr3net_top (
         .clk50m(clk50m), .ready(ready),
         .netrmii(netrmii), .phyrst(phyrst),
         .rx_head_rdy_i(rx_head_rdy), .rx_head_av_o(rx_head_av), .rx_head_o(rx_head),
-        .rx_data_rdy_i(1'b1),        .rx_data_av_o(rx_data_av), .rx_data_o(rx_data),
+        .rx_data_rdy_i(rx_data_rdy), .rx_data_av_o(rx_data_av), .rx_data_o(rx_data),
         .tx_ip_i(tx_ip), .tx_src_port_i(tx_src_port), .tx_dst_port_i(tx_dst_port),
         .tx_req_i(tx_req), .tx_data_i(tx_data), .tx_data_av_i(tx_data_av),
         .tx_req_rdy_o(tx_req_rdy), .tx_data_rdy_o(tx_data_rdy)
     );
-
-    // capture reply destination from the request IP header (proven sequence)
-    logic [31:0] req_ip;
-    logic [15:0] req_port;
-    logic [2:0]  hstate;
-    always_ff @(posedge clk50m or negedge ready) begin
-        if (!ready) begin hstate <= 3'd0; rx_head_rdy <= 1'b0; end
-        else begin
-            rx_head_rdy <= 1'b0;
-            case (hstate)
-                0: if (rx_head_av) begin rx_head_rdy <= 1'b1; hstate <= 1; end
-                1: begin rx_head_rdy <= 1'b1; req_ip   <= rx_head;        hstate <= 2; end
-                2: begin rx_head_rdy <= 1'b1;                             hstate <= 3; end
-                3: begin rx_head_rdy <= 1'b1; req_port <= rx_head[31:16]; hstate <= 4; end
-                4: if (!rx_head_av) hstate <= 0;
-                default: hstate <= 0;
-            endcase
-        end
-    end
 
     wire core_rst = ~ready;
 
@@ -139,13 +120,17 @@ module gwddr3net_top (
         if (!rst) begin ck50 <= 0; rx_seen <= 0; end
         else begin ck50 <= ck50 + 23'd1; if (rx_data_av) rx_seen <= 1'b1; end
 
-    // RX byte staging -> parser
-    logic [7:0] sdat;  logic sv, psv;
-    always_ff @(posedge clk50m or posedge core_rst)
-        if (core_rst) begin sv <= 0; psv <= 0; sdat <= 0; end
-        else begin sv <= rx_data_av; sdat <= rx_data; psv <= sv; end
-    wire p_valid = sv, p_sop = sv & ~psv, p_eop = sv & ~rx_data_av;
-    wire [7:0] p_data = sdat;
+    // Datagram framing from udp.sv's header FIFO (payload length), not from gaps in the
+    // byte stream - see groovy_udp_rx_framer.v. It also captures the reply address.
+    wire        p_valid, p_sop, p_eop;
+    wire [7:0]  p_data;
+    wire [31:0] req_ip;  wire [15:0] req_port;
+    groovy_udp_rx_framer u_framer (
+        .clk(clk50m), .rst(core_rst),
+        .rx_head_av(rx_head_av), .rx_head(rx_head), .rx_head_rdy(rx_head_rdy),
+        .rx_data_av(rx_data_av), .rx_data(rx_data), .rx_data_rdy(rx_data_rdy),
+        .p_valid(p_valid), .p_data(p_data), .p_sop(p_sop), .p_eop(p_eop),
+        .src_ip(req_ip), .src_port(req_port));
 
     wire        init_valid, close_valid, get_status_valid, blit_valid;
     wire        get_features_valid, get_switchres_valid, switchres_valid, session_active;
@@ -297,25 +282,29 @@ module gwddr3net_top (
         .IO_ddr_dq(ddr_dq), .IO_ddr_dqs(ddr_dqs), .IO_ddr_dqs_n(ddr_dqs_n)
     );
 
-    // adapter: muxed between the network WRITER (w_*, full-beat + single-word) and the
-    // line-buffer READER (r_*), gated by have_frame_p.
-    reg  [25:0]  ddr_addr_m;
-    reg  [15:0]  ddr_din;
-    reg  [127:0] ddr_din_beat;
-    reg          a_rd, a_wr, a_wr_beat;
-    wire [15:0]  ddr_dout;
-    wire         ddr_data_ready, ddr_busy;
-    groovy_gwddr3_adapter u_adapt (
+    // Two-client port onto the IP: the network WRITER (w_*) and the line-buffer READER
+    // (r_*) each have their own request latch and busy; the port alternates between them
+    // one BL8 transaction at a time. See groovy_gwddr3_port.v for what this replaced.
+    wire         w_wr, w_wr_beat, w_busy;
+    wire [25:0]  w_addr;
+    wire [15:0]  w_din;
+    wire [127:0] w_din_beat;
+    wire         r_rd, r_busy, r_data_ready;
+    wire [25:0]  r_addr;
+    wire [127:0] r_dout128;
+    wire [15:0]  port_rd_cnt, port_wr_cnt, port_wait_max;
+    groovy_gwddr3_port u_port (
         .uclk(pclk), .urst(ddr_rst), .init_calib_complete(init_calib_complete),
-        .rd(a_rd), .wr(a_wr), .wr_beat(a_wr_beat), .addr(ddr_addr_m),
-        .din(ddr_din), .din_beat(ddr_din_beat),
-        .busy(ddr_busy), .data_ready(ddr_data_ready), .dout(ddr_dout),
+        .r_rd(r_rd), .r_addr(r_addr), .r_busy(r_busy),
+        .r_data_ready(r_data_ready), .r_dout128(r_dout128),
+        .w_wr(w_wr), .w_wr_beat(w_wr_beat), .w_addr(w_addr),
+        .w_din(w_din), .w_din_beat(w_din_beat), .w_busy(w_busy),
         .cmd(ip_cmd), .cmd_en(ip_cmd_en), .cmd_ready(ip_cmd_ready), .ip_addr(ip_addr),
         .wr_data(ip_wr_data), .wr_data_en(ip_wr_data_en), .wr_data_end(ip_wr_data_end),
         .wr_data_mask(ip_wr_data_mask), .wr_data_rdy(ip_wr_data_rdy),
-        .rd_data(ip_rd_data), .rd_data_valid(ip_rd_data_valid)
+        .rd_data(ip_rd_data), .rd_data_valid(ip_rd_data_valid),
+        .stat_rd(port_rd_cnt), .stat_wr(port_wr_cnt), .stat_wait_max(port_wait_max)
     );
-    wire [127:0] ddr_dout128 = 128'd0;
 
     // =========================================================================
     // CDC: blit pixels (clk50m) -> async FIFO -> DDR3 writer (pclk)
@@ -342,16 +331,12 @@ module gwddr3net_top (
         if (core_rst) drop_cnt <= 16'd0;
         else if (fb_we & fifo_full) drop_cnt <= drop_cnt + 16'd1;
 
-    wire         w_wr, w_wr_beat;
-    wire [25:0]  w_addr;
-    wire [15:0]  w_din;
-    wire [127:0] w_din_beat;
     wire         wr_active;
     groovy_ddr3_writer #(.AW(26), .FIFO_AW(FIFO_AW)) u_ddrwr (
         .clk(pclk), .rst(ddr_rst),
         .fifo_empty(fifo_empty), .fifo_rdata(fifo_rdata), .fifo_rd_en(fifo_rd_en),
         .wr(w_wr), .wr_beat(w_wr_beat), .addr(w_addr), .din(w_din), .din_beat(w_din_beat),
-        .busy(ddr_busy), .active(wr_active));
+        .busy(w_busy), .active(wr_active));
 
     // =========================================================================
     // have_frame: latch the first received frame (clk50m), CDC into pclk + pix_clk.
@@ -397,14 +382,13 @@ module gwddr3net_top (
     // =========================================================================
     // line-buffer reader (pclk fetch / pix_clk scanout)
     // =========================================================================
-    wire        r_rd;
-    wire [25:0] r_addr;
     wire [15:0] pix565;
     wire        fetch_active;
     wire        dbg_lbwe; wire [15:0] dbg_lbdata, dbg_fillline, dbg_col; wire [2:0] dbg_fstate;
     wire [15:0] dbg_fe, dbg_pr, dbg_dr;
     groovy_linebuf_reader #(.LINE_W(1024), .LW_ADDR(10), .DDR_AW(26),
-                            .SINGLE_WORD(1), .H_REPL(HREP), .V_REPL(VREP), .H_SH(HSH)) u_lbr (
+                            .SINGLE_WORD(0), .BURST_PLAIN(1), .FWAIT_TIMEOUT(250),
+                            .H_REPL(HREP), .V_REPL(VREP), .H_SH(HSH)) u_lbr (
         .pix_clk(pix_clk), .pix_rst(~hdmi_rst_n),
         .h_active(SRC_W), .v_active(SRC_H),
         .hcount(hcount), .vcount(vcount), .de(de),
@@ -414,53 +398,12 @@ module gwddr3net_top (
         // hold the reader's fetch in reset until the first frame has landed in DDR3.
         .pclk(pclk), .pclk_rst(~pclk_resetn | ~have_frame_p), .base_addr(BASE),
         .rd(r_rd), .addr(r_addr),
-        .busy(ddr_busy), .data_ready(ddr_data_ready),
-        .dout128(ddr_dout128), .dout(ddr_dout),
+        .busy(r_busy), .data_ready(r_data_ready),
+        .dout128(r_dout128), .dout(16'd0),
         .fetch_active(fetch_active),
         .dbg_lbwe(dbg_lbwe), .dbg_lbdata(dbg_lbdata), .dbg_fillline(dbg_fillline),
         .dbg_col(dbg_col), .dbg_fstate(dbg_fstate),
         .dbg_fe(dbg_fe), .dbg_pr(dbg_pr), .dbg_dr(dbg_dr));
-
-    // =========================================================================
-    // DDR3 port arbitration: the WRITER (network fill) and the READER (scanout)
-    // SHARE the single adapter port so EVERY received frame overwrites the previous
-    // one in place (single buffer, tearing tolerated for now). Earlier this locked
-    // the writer out after the first frame, so re-sent pictures never landed.
-    //
-    // The READER has priority: writes are only granted in the gaps BETWEEN the
-    // reader's line fetches (~fetch_active). This is essential - injecting a write
-    // into the middle of a fetch desyncs the reader's DQS byte lanes (the gapped-read
-    // hazard), so we never interleave mid-fetch. The reader fetches one source line
-    // then idles ~2 output lines (V_REPL replay); the writer drains its FIFO during
-    // those idle windows. The 1024-deep FIFO buffers RX across the busy windows; the
-    // writer is ~6x faster than RX so it keeps up.
-    //
-    // Before the first frame (have_frame_p low) the reader is held in reset, so the
-    // writer simply owns the bus to do the initial fill. After that, the writer is
-    // granted ONLY while the reader is not fetching (~fetch_active). This is safe to
-    // gate combinationally: the adapter latches a write atomically the cycle wr_beat
-    // is accepted (A_IDLE -> A_WR), so if a fetch starts on that exact cycle the beat
-    // is simply suppressed and the writer retries next cycle (no half-write). The
-    // reader reasserts fetch_active each source line, so the writer can never hog the
-    // bus longer than one inter-line gap.
-    wire grant_wr = wr_active && (!have_frame_p || !fetch_active);
-    always @(*) begin
-        if (grant_wr) begin
-            a_wr         = w_wr;
-            a_wr_beat    = w_wr_beat;
-            a_rd         = 1'b0;
-            ddr_addr_m   = w_addr;
-            ddr_din      = w_din;
-            ddr_din_beat = w_din_beat;
-        end else begin
-            a_wr         = 1'b0;
-            a_wr_beat    = 1'b0;
-            a_rd         = r_rd;
-            ddr_addr_m   = r_addr;
-            ddr_din      = 16'd0;
-            ddr_din_beat = 128'd0;
-        end
-    end
 
     // =========================================================================
     // RGB565 -> RGB888 + DVI_TX
