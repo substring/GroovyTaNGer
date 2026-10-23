@@ -19,7 +19,7 @@
 #       (loads at NATIVE resolution, runs switchres for the 15kHz CRT modeline,
 #        sends CMD_SWITCHRES + the native pixels; --refresh/--monitor/--dotclock-min)
 #   gm_test_sender.py --host 192.168.1.59 blitstream --width 320 --height 240 --fps 30
-import argparse, socket, struct, sys, time
+import argparse, select, socket, struct, sys, time
 
 DATA_PORT = 32100
 
@@ -157,20 +157,18 @@ def gen_frame_anim(w: int, h: int, phase: int) -> bytes:
 def send_blitstream(sock, addr, args):
     # continuous frames -> exercises the double buffer (smooth, no tearing).
     sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)
-    sock.setblocking(False)
     period = 1.0 / args.fps if args.fps > 0 else 0.0
     ch = args.chunk & ~1
     for i in range(args.frames):
         t0 = time.time()
+        frame = gen_frame_anim(args.width, args.height, i)   # before the header: ~1 ms rule
         sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, i + 1, 0, args.vsync), addr)
-        frame = gen_frame_anim(args.width, args.height, i)
         for off in range(0, len(frame), ch):
             sock.sendto(frame[off:off+ch], addr)
             if args.delay > 0: time.sleep(args.delay)
-        try:
-            while True: sock.recv(64)          # drain ACKs
-        except BlockingIOError:
-            pass
+        # drain ACKs without blocking (a socket with a timeout waits even on MSG_DONTWAIT)
+        while select.select([sock], [], [], 0)[0]:
+            sock.recv(64)
         dt = time.time() - t0
         if dt < period: time.sleep(period - dt)
     print(f"blitstream: {args.frames} frames {args.width}x{args.height} "
@@ -182,15 +180,18 @@ def send_blitimg(sock, addr, args):
     sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)
     try: print(decode_reply(sock.recvfrom(64)[0]))         # INIT ACK
     except socket.timeout: print("(no INIT ack)")
-    sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, 0, args.vsync), addr)
-    try: print(decode_reply(sock.recvfrom(64)[0]))         # BLIT ACK
-    except socket.timeout: print("(no BLIT ack)")
+    # Pixels go out right behind the BLIT header and its ACK is read afterwards: the
+    # FPGA's blit_rx aborts a frame after ~1 ms without a byte (gwddr3net), so waiting
+    # for the ACK or sleeping between datagrams loses every frame.
     frame = gen_frame(args.width, args.height)
+    sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, 0, args.vsync), addr)
     ch = args.chunk & ~1                                    # keep pixels (2B) aligned
     n = 0
     for off in range(0, len(frame), ch):
         sock.sendto(frame[off:off+ch], addr); n += 1
-        if args.delay > 0: time.sleep(args.delay)           # avoid overrunning UDP RX
+        if args.delay > 0: time.sleep(args.delay)
+    try: print(decode_reply(sock.recvfrom(64)[0]))         # BLIT ACK
+    except socket.timeout: print("(no BLIT ack)")
     print(f"blitimg: {args.width}x{args.height} = {len(frame)} bytes "
           f"in {n} datagrams (delay={args.delay}s) -> {addr[0]}:{addr[1]}")
 
@@ -430,15 +431,15 @@ def send_blitfile(sock, addr, args):
     sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)   # rgb565
     try: print(decode_reply(sock.recvfrom(64)[0]))
     except socket.timeout: print("(no INIT ack)")
+    # pixels right behind the header, ACK read afterwards (see send_blitimg)
     sock.sendto(struct.pack("<BIBH", CMD_BLIT_FIELD_VSYNC, args.frame, 0, args.vsync), addr)
-    try: print(decode_reply(sock.recvfrom(64)[0]))
-    except socket.timeout: print("(no BLIT ack)")
-
     ch = args.chunk & ~1                                   # keep pixels (2B) aligned
     n = 0
     for off in range(0, len(frame), ch):
         sock.sendto(frame[off:off+ch], addr); n += 1
         if args.delay > 0: time.sleep(args.delay)
+    try: print(decode_reply(sock.recvfrom(64)[0]))
+    except socket.timeout: print("(no BLIT ack)")
     print(f"blitfile: {args.file} {w}x{h} = {len(frame)} bytes (RGB565) "
           f"in {n} datagrams (delay={args.delay}s) -> {addr[0]}:{addr[1]}")
 
@@ -505,7 +506,7 @@ def main():
     bi.add_argument("--height", type=int, default=75)
     bi.add_argument("--frame", type=int, default=1)
     bi.add_argument("--chunk", type=int, default=1440)
-    bi.add_argument("--delay", type=float, default=0.002, help="seconds between datagrams")
+    bi.add_argument("--delay", type=float, default=0.0, help="seconds between datagrams (0 = back to back; the FPGA aborts a blit after ~1 ms idle)")
     bi.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     bf = sub.add_parser("blitfile",
         help="send a PNG/BMP at NATIVE size; switchres computes+sends the CRT modeline")
@@ -517,7 +518,7 @@ def main():
                     help="min pixel clock MHz (H super-res to clear the HDMI floor)")
     bf.add_argument("--frame", type=int, default=1)
     bf.add_argument("--chunk", type=int, default=1440)
-    bf.add_argument("--delay", type=float, default=0.01, help="seconds between datagrams")
+    bf.add_argument("--delay", type=float, default=0.0, help="seconds between datagrams (0 = back to back; the FPGA aborts a blit after ~1 ms idle)")
     bf.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     br = sub.add_parser("blitrace",
         help="BEAM-RACE paced blit (open-loop rate match): streams a frame's lines at a "
@@ -555,7 +556,7 @@ def main():
     bs.add_argument("--frames", type=int, default=600)
     bs.add_argument("--fps", type=float, default=30.0)
     bs.add_argument("--chunk", type=int, default=1440)
-    bs.add_argument("--delay", type=float, default=0.001, help="seconds between datagrams")
+    bs.add_argument("--delay", type=float, default=0.0, help="seconds between datagrams (0 = back to back; the FPGA aborts a blit after ~1 ms idle)")
     bs.add_argument("--vsync", type=int, default=0, help=">0 = beam-race mode")
     args = p.parse_args()
 
