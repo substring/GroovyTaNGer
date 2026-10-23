@@ -247,6 +247,13 @@ module ddr3video_top (
         .hsync(hsync), .vsync(vsync), .de(de),
         .line_start(line_start), .frame_start(frame_start));
 
+    // fetch_fs: 1-cycle pulse at the START OF VERTICAL BLANKING (vcount==OUT_H &&
+    // hcount==0), as in gwddr3video_top. The reader restarts its fetch on it (and its
+    // scanout line counter); left unconnected, the fetch filled frame 0 only.
+    reg fetch_fs;
+    always @(posedge pix_clk)
+        fetch_fs <= (vcount == OUT_H) && (hcount == 16'd0);
+
     // delay de/hs/vs to match the line-buffer reader's pixel pipeline (2 pix_clk)
     reg [1:0] de_p, hs_p, vs_p;
     always @(posedge pix_clk) begin
@@ -275,6 +282,7 @@ module ddr3video_top (
         .h_active(SRC_W), .v_active(SRC_H),
         .hcount(hcount), .vcount(vcount), .de(de),
         .line_start(line_start), .frame_start(frame_start),
+        .fetch_fs(fetch_fs),
         .pix_rgb565(pix565),
         // HOLD the reader's fetch FSM in reset until the boot writer has filled
         // the framebuffer (fill_done). Before that the arbiter gives DDR3 to the

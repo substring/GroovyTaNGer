@@ -22,9 +22,12 @@ module groovy_diag_noram_tb;
     reg pclk=0;    always #5.0 pclk=~pclk;          // 100 MHz
     reg rst_n=0;
 
-    // ---- fake memory (perfect bars), LATENCY 40 like diag_noram ----
+    // ---- fake memory (perfect bars), LATENCY 11 like diag_noram_top ----
+    // (40 was used before: in this shrunken raster a 16-word line then takes ~6.7 us to
+    // fetch against a 3-output-line budget of ~3.8 us, which the real 720p top never
+    // faces: 320 words x ~13 cyc = ~42 us against ~67 us.)
     wire        r_rd; wire [25:0] r_addr; wire [15:0] fk_dout; wire fk_dready, fk_busy;
-    groovy_fake_ddr3 #(.ADDR_W(26), .LATENCY(40), .BARS(1), .WIDTH(S_W), .HEIGHT(S_H)) u_fake (
+    groovy_fake_ddr3 #(.ADDR_W(26), .LATENCY(11), .BARS(1), .WIDTH(S_W), .HEIGHT(S_H)) u_fake (
         .clk(pclk), .rst(~rst_n), .rd(r_rd), .wr(1'b0), .refresh(1'b0),
         .addr(r_addr), .din(16'd0), .dout(fk_dout), .data_ready(fk_dready), .busy(fk_busy));
 
@@ -39,13 +42,18 @@ module groovy_diag_noram_tb;
         .hsync(hsync), .vsync(vsync), .de(de),
         .line_start(line_start), .frame_start(frame_start));
 
+    // fetch_fs exactly as diag_noram_top makes it: a registered pulse at vblank start
+    reg fetch_fs = 1'b0;
+    always @(posedge pix_clk) fetch_fs <= (vcount == O_H) && (hcount == 16'd0);
+
     // ---- the reader under test ----
     wire [15:0] pix565; wire fetch_active;
     groovy_linebuf_reader #(.LINE_W(64), .LW_ADDR(6), .DDR_AW(26),
         .SINGLE_WORD(1), .H_REPL(HREP), .V_REPL(VREP), .H_SH(HSH)) dut (
         .pix_clk(pix_clk), .pix_rst(~rst_n), .h_active(S_W), .v_active(S_H),
         .hcount(hcount), .vcount(vcount), .de(de),
-        .line_start(line_start), .frame_start(frame_start), .pix_rgb565(pix565),
+        .line_start(line_start), .frame_start(frame_start), .fetch_fs(fetch_fs),
+        .pix_rgb565(pix565),
         .pclk(pclk), .pclk_rst(~rst_n), .base_addr(26'd0),
         .rd(r_rd), .addr(r_addr), .busy(fk_busy), .data_ready(fk_dready),
         .dout128(128'd0), .dout(fk_dout), .fetch_active(fetch_active));
@@ -62,17 +70,19 @@ module groovy_diag_noram_tb;
         end
     endfunction
 
-    // golden check, delayed 2 pix_clk to match the reader read pipeline.
+    // golden check, delayed 2 pix_clk to match the reader read pipeline: eh[k] is
+    // hcount k+1 pix_clk ago, so the DUT output lines up with eh[1].
     reg [15:0] eh[0:2], ev[0:2]; reg eact[0:2]; integer i;
     always @(posedge pix_clk) begin
         eh[0]<=hcount; ev[0]<=vcount; eact[0]<=(de && hcount<O_W);
         for (i=1;i<3;i=i+1) begin eh[i]<=eh[i-1]; ev[i]<=ev[i-1]; eact[i]<=eact[i-1]; end
     end
-    localparam PIPE=2;
+    localparam PIPE=1;
     integer errors=0, checked=0; reg done=0;
     integer frame=0; reg vs_d=0;
     integer ferr[0:7];   // errors per frame
-    initial for (frame=0;frame<8;frame=frame+1) ferr[frame]=0;
+    integer k;
+    initial for (k=0;k<8;k=k+1) ferr[k]=0;   // own index: reusing `frame` left it at 8
     always @(posedge pix_clk) begin
         vs_d <= vsync;
         if (vsync && !vs_d && frame<7) frame <= frame + 1;   // new frame on vsync rise
@@ -90,12 +100,13 @@ module groovy_diag_noram_tb;
         repeat (6*VTOT*HTOT) @(negedge pix_clk);
         done=1;
         $display("RESULT: %0d errors / %0d checked (total; includes first-frame cold-start)", errors, checked);
-        for (frame=0; frame<7; frame=frame+1)
-            $display("  frame %0d: %0d errors", frame, ferr[frame]);
-        // PASS = the SETTLED frames (2..6) are pixel-perfect. Frames 0-1 are allowed a
-        // cold-start fill transient (buffers prime during the first frame's blanking).
-        if (ferr[2]==0 && ferr[3]==0 && ferr[4]==0 && ferr[5]==0 && ferr[6]==0)
-            $display("PASS: settled frames 2-6 are pixel-perfect");
+        for (k=0; k<7; k=k+1)
+            $display("  frame %0d: %0d errors", k, ferr[k]);
+        // PASS = every frame after the cold first one is pixel-perfect. Frame 0 starts at
+        // the first active pixel with nothing pre-filled; each later frame is preceded by
+        // a vblank in which fetch_fs restarts the fetch. A frame boundary is the vsync rise.
+        if (errors == ferr[0] && checked >= 5*O_W*O_H)
+            $display("PASS: groovy_diag_noram_tb (frames 1-6 pixel-perfect)");
         else
             $display("FAIL: a settled frame has errors");
         $finish;

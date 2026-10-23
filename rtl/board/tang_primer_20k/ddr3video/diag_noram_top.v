@@ -76,6 +76,13 @@ module diag_noram_top (
         .hsync(hsync), .vsync(vsync), .de(de),
         .line_start(line_start), .frame_start(frame_start));
 
+    // fetch_fs: 1-cycle pulse at the START OF VERTICAL BLANKING (vcount==OUT_H &&
+    // hcount==0), as in gwddr3video_top. The reader restarts its fetch on it (and its
+    // scanout line counter); left unconnected, the fetch filled frame 0 only.
+    reg fetch_fs;
+    always @(posedge pix_clk)
+        fetch_fs <= (vcount == OUT_H) && (hcount == 16'd0);
+
     reg [1:0] de_p, hs_p, vs_p;
     always @(posedge pix_clk) begin
         de_p <= {de_p[0], de}; hs_p <= {hs_p[0], hsync}; vs_p <= {vs_p[0], vsync};
@@ -91,6 +98,7 @@ module diag_noram_top (
         .h_active(SRC_W), .v_active(SRC_H),
         .hcount(hcount), .vcount(vcount), .de(de),
         .line_start(line_start), .frame_start(frame_start),
+        .fetch_fs(fetch_fs),
         .pix_rgb565(pix565),
         .pclk(pclk), .pclk_rst(~pclk_resetn), .base_addr(BASE),
         .rd(r_rd), .addr(r_addr),
