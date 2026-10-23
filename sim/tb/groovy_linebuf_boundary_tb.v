@@ -13,8 +13,7 @@ module groovy_linebuf_boundary_tb;
     reg pix_clk=0; always #7 pix_clk=~pix_clk;
     reg pclk=0;    always #5 pclk=~pclk;
     reg pix_rst=1, pclk_rst=1;
-    reg [15:0] hcount=0; wire [15:0] vcount;
-    reg de=0, line_start=0, frame_start=0, fetch_fs=0;
+    reg run=0;
     wire [15:0] pix_rgb;
     wire rd; wire [AW-1:0] addr; reg busy=0, data_ready=0; reg [15:0] dout=0;
     wire [2:0] dbg_fstate;
@@ -47,29 +46,42 @@ module groovy_linebuf_boundary_tb;
         end
     end
 
-    // raster (vcount is the ACTIVE line index; vblank at top preloads)
-    localparam VB = VTOTAL - OUT_H;
-    reg [15:0] vraw=0; reg run=0;
-    wire active_line = (vraw >= VB);
-    assign vcount = active_line ? (vraw - VB) : 16'd0;
-    always @(posedge pix_clk) if (run) begin
-        if (hcount==HTOTAL-1) begin hcount<=0; vraw<=(vraw==VTOTAL-1)?0:vraw+1; end
-        else hcount<=hcount+1;
-    end
-    always @(*) begin
-        de          = run && active_line && (hcount<OUT_W);
-        line_start  = run && (hcount==0) && active_line;
-        frame_start = run && (hcount==0) && (vraw==0);
-        fetch_fs    = run && (hcount==0) && (vraw==(VB-1));   // vblank-start prefill
+    // ---- raster: the real video_timing_gen, wired like gwddr3video/gwddr3net_top ----
+    // Active video first (vcount 0..OUT_H-1), blanking after. frame_start is the registered
+    // pulse WITH the first active pixel; fetch_fs is the tops' registered pulse at the
+    // start of vertical blanking (vcount == OUT_H, hcount == 0). The raster starts at (0,0)
+    // when run rises, so frame 0 is a cold start with no vblank pre-fill; `warm` rises
+    // at the first fetch_fs.
+    wire [15:0] hcount, vcount;
+    wire        de, line_start, frame_start;
+    video_timing_gen u_vtg (
+        .clk(pix_clk), .rst(pix_rst), .en(run),
+        .h_total(HTOTAL[15:0]), .h_active(OUT_W[15:0]),
+        .h_sync_begin(OUT_W[15:0] + 16'd2), .h_sync_end(OUT_W[15:0] + 16'd4),
+        .v_total(VTOTAL[15:0]), .v_active(OUT_H[15:0]),
+        .v_sync_begin(OUT_H[15:0] + 16'd1), .v_sync_end(OUT_H[15:0] + 16'd2),
+        .h_sync_pos(1'b1), .v_sync_pos(1'b1),
+        .hcount(hcount), .vcount(vcount), .hsync(), .vsync(), .de(de),
+        .line_start(line_start), .frame_start(frame_start));
+    reg fetch_fs = 1'b0, warm = 1'b0;
+    always @(posedge pix_clk) begin
+        fetch_fs <= (vcount == OUT_H) && (hcount == 16'd0);
+        if (fetch_fs) warm <= 1'b1;
     end
 
-    // checker: expected output pixel = sline_val(vcount/VREP). Check at mid-line (skip
-    // the 2px left-edge pipeline shadow). Record per-output-line pass/fail.
-    integer errs=0, lines_checked=0; reg [15:0] last_vraw=16'hFFFF;
-    always @(posedge pix_clk) if (run && de && active_line && hcount>=OUT_W/2) begin
-        if (pix_rgb !== sline_val(vcount/VREP)) begin
-            if (errs<20) $display("BAD out_row(vraw)=%0d vcount=%0d srcline=%0d got=%h exp=%h",
-                                  vraw, vcount, vcount/VREP, pix_rgb, sline_val(vcount/VREP));
+    // checker: expected output pixel = sline_val(vcount/VREP), for every active pixel
+    // of every frame after the cold first one. The DUT's read pipeline is 2 pix_clk.
+    reg [15:0] ev0, ev1; reg eact0, eact1;
+    always @(posedge pix_clk) begin
+        ev0 <= vcount; eact0 <= de;
+        ev1 <= ev0;    eact1 <= eact0;
+    end
+    integer errs=0, checked=0;
+    always @(posedge pix_clk) if (run && warm && eact1) begin
+        checked=checked+1;
+        if (pix_rgb !== sline_val(ev1/VREP)) begin
+            if (errs<20) $display("BAD vcount=%0d srcline=%0d got=%h exp=%h",
+                                  ev1, ev1/VREP, pix_rgb, sline_val(ev1/VREP));
             errs=errs+1;
         end
     end
@@ -77,8 +89,9 @@ module groovy_linebuf_boundary_tb;
     initial begin
         repeat(6) @(negedge pclk); pclk_rst=0; pix_rst=0;
         repeat(6) @(negedge pix_clk); run=1;
-        repeat(3*VTOTAL*HTOTAL) @(negedge pix_clk);
-        if (errs==0) $display("PASS: groovy_linebuf_boundary_tb (no wrong output lines)");
+        repeat(4*VTOTAL*HTOTAL) @(negedge pix_clk);   // cold frame + 3 checked
+        if (errs==0 && checked>=3*OUT_W*OUT_H)
+                     $display("PASS: groovy_linebuf_boundary_tb (no wrong output lines, %0d px)", checked);
         else         $display("FAIL: groovy_linebuf_boundary_tb (%0d bad pixels)", errs);
         $finish;
     end

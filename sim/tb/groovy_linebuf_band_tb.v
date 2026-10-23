@@ -29,7 +29,7 @@ module groovy_linebuf_band_tb;
     endfunction
 
     wire rd; wire [AW-1:0] addr; reg busy=0, data_ready=0; reg [15:0] dout=0;
-    reg [15:0] hcount=0, vcount=0; reg de=0, line_start=0, frame_start=0;
+    reg run=0;
     wire [15:0] pix_rgb; wire fetch_active;
     wire dbg_lbwe; wire [15:0] dbg_lbdata, dbg_fillline;
 
@@ -37,7 +37,8 @@ module groovy_linebuf_band_tb;
         .SINGLE_WORD(1), .H_REPL(HREP), .V_REPL(VREP), .H_SH(HSH)) dut (
         .pix_clk(pix_clk), .pix_rst(pix_rst), .h_active(SRC_W[15:0]), .v_active(SRC_H[15:0]),
         .hcount(hcount), .vcount(vcount), .de(de),
-        .line_start(line_start), .frame_start(frame_start), .pix_rgb565(pix_rgb),
+        .line_start(line_start), .frame_start(frame_start), .fetch_fs(fetch_fs),
+        .pix_rgb565(pix_rgb),
         .pclk(pclk), .pclk_rst(pclk_rst), .base_addr(26'd0),
         .rd(rd), .addr(addr), .busy(busy), .data_ready(data_ready),
         .dout128(128'd0), .dout(dout), .fetch_active(fetch_active),
@@ -54,17 +55,27 @@ module groovy_linebuf_band_tb;
         end
     end
 
-    localparam VB = VTOTAL - OUT_H;
-    reg [15:0] vraw=0; reg run=0; wire active_line = (vraw >= VB);
-    always @(posedge pix_clk) if (run) begin
-        if (hcount==HTOTAL-1) begin hcount<=0; vraw<=(vraw==VTOTAL-1)?0:vraw+1; end
-        else hcount<=hcount+1;
-    end
-    always @(*) begin
-        vcount      = active_line ? (vraw-VB) : 16'd0;
-        de          = run && active_line && (hcount < OUT_W);
-        line_start  = run && (hcount==0);
-        frame_start = run && (hcount==0) && (vraw==0);
+    // ---- raster: the real video_timing_gen, wired like gwddr3video/gwddr3net_top ----
+    // Active video first (vcount 0..OUT_H-1), blanking after. frame_start is the registered
+    // pulse WITH the first active pixel; fetch_fs is the tops' registered pulse at the
+    // start of vertical blanking (vcount == OUT_H, hcount == 0). The raster starts at (0,0)
+    // when run rises, so frame 0 is a cold start with no vblank pre-fill; `warm` rises
+    // at the first fetch_fs.
+    wire [15:0] hcount, vcount;
+    wire        de, line_start, frame_start;
+    video_timing_gen u_vtg (
+        .clk(pix_clk), .rst(pix_rst), .en(run),
+        .h_total(HTOTAL[15:0]), .h_active(OUT_W[15:0]),
+        .h_sync_begin(OUT_W[15:0] + 16'd2), .h_sync_end(OUT_W[15:0] + 16'd4),
+        .v_total(VTOTAL[15:0]), .v_active(OUT_H[15:0]),
+        .v_sync_begin(OUT_H[15:0] + 16'd1), .v_sync_end(OUT_H[15:0] + 16'd2),
+        .h_sync_pos(1'b1), .v_sync_pos(1'b1),
+        .hcount(hcount), .vcount(vcount), .hsync(), .vsync(), .de(de),
+        .line_start(line_start), .frame_start(frame_start));
+    reg fetch_fs = 1'b0, warm = 1'b0;
+    always @(posedge pix_clk) begin
+        fetch_fs <= (vcount == OUT_H) && (hcount == 16'd0);
+        if (fetch_fs) warm <= 1'b1;
     end
 
     // golden check, expected delayed 2 pix_clk to match the DUT read pipeline.
@@ -73,9 +84,10 @@ module groovy_linebuf_band_tb;
         eh[0]<=hcount; ev[0]<=vcount; eact[0]<=(de && hcount<OUT_W);
         for (i=1;i<3;i=i+1) begin eh[i]<=eh[i-1]; ev[i]<=ev[i-1]; eact[i]<=eact[i-1]; end
     end
-    localparam PIPE=2;
+    // eh[k] is hcount k+1 pix_clk ago: the DUT's 2-cycle read pipeline is eh[1].
+    localparam PIPE=1;
     integer errors=0, checked=0; reg done=0;
-    always @(posedge pix_clk) if (run && !done && eact[PIPE] && eh[PIPE]>=PIPE) begin
+    always @(posedge pix_clk) if (run && warm && !done && eact[PIPE]) begin
         checked = checked + 1;
         if (pix_rgb !== band_color(ev[PIPE]/VREP)) begin
             if (errors < 12)
@@ -89,7 +101,7 @@ module groovy_linebuf_band_tb;
     initial begin
         repeat (4) @(negedge pclk); pclk_rst=0; pix_rst=0;
         repeat (4) @(negedge pix_clk); run=1;
-        repeat (4*VTOTAL*HTOTAL + 100) @(negedge pix_clk);
+        repeat (4*VTOTAL*HTOTAL + 100) @(negedge pix_clk);   // cold frame + 3 checked
         done=1;
         $display("RESULT: %0d errors / %0d checked", errors, checked);
         if (errors==0) $display("PASS: band_tb"); else $display("FAIL: band_tb");

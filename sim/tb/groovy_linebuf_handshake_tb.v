@@ -19,8 +19,7 @@ module groovy_linebuf_handshake_tb;
     reg pclk=0;    always #5 pclk=~pclk;
 
     reg pix_rst=1, pclk_rst=1;
-    reg [15:0] hcount=0, vcount=0;
-    reg de=0, line_start=0, frame_start=0;
+    reg run_raster = 0;
     wire [15:0] pix_rgb;
 
     wire        rd;
@@ -35,7 +34,8 @@ module groovy_linebuf_handshake_tb;
     groovy_linebuf_reader #(.LINE_W(LINE_W), .LW_ADDR(LW), .DDR_AW(AW), .SINGLE_WORD(1)) dut (
         .pix_clk(pix_clk), .pix_rst(pix_rst), .h_active(W[15:0]), .v_active(H[15:0]),
         .hcount(hcount), .vcount(vcount), .de(de),
-        .line_start(line_start), .frame_start(frame_start), .pix_rgb565(pix_rgb),
+        .line_start(line_start), .frame_start(frame_start), .fetch_fs(fetch_fs),
+        .pix_rgb565(pix_rgb),
         .pclk(pclk), .pclk_rst(pclk_rst), .base_addr(26'd0),
         .rd(rd), .addr(addr), .busy(busy), .data_ready(data_ready),
         .dout128(128'd0), .dout(dout),
@@ -96,19 +96,27 @@ module groovy_linebuf_handshake_tb;
         end
     end
 
-    // raster
-    localparam VB = VTOTAL - H;
-    reg [15:0] vraw = 0; reg run_raster = 0;
-    wire active_line = (vraw >= VB);
-    always @(posedge pix_clk) if (run_raster) begin
-        if (hcount == HTOTAL-1) begin hcount <= 0; vraw <= (vraw==VTOTAL-1)?0:vraw+1; end
-        else hcount <= hcount + 1;
-    end
-    always @(*) begin
-        vcount      = active_line ? (vraw - VB) : 16'd0;
-        de          = run_raster && active_line && (hcount < W);
-        line_start  = run_raster && (hcount == 0) && active_line;
-        frame_start = run_raster && (hcount == 0) && (vraw == 0);
+    // ---- raster: the real video_timing_gen, wired like gwddr3video/gwddr3net_top ----
+    // Active video first (vcount 0..H-1), blanking after. frame_start is the registered
+    // pulse WITH the first active pixel; fetch_fs is the tops' registered pulse at the
+    // start of vertical blanking (vcount == H, hcount == 0). The raster starts at (0,0)
+    // when run_raster rises, so frame 0 is a cold start with no vblank pre-fill; `warm` rises
+    // at the first fetch_fs.
+    wire [15:0] hcount, vcount;
+    wire        de, line_start, frame_start;
+    video_timing_gen u_vtg (
+        .clk(pix_clk), .rst(pix_rst), .en(run_raster),
+        .h_total(HTOTAL[15:0]), .h_active(W[15:0]),
+        .h_sync_begin(W[15:0] + 16'd2), .h_sync_end(W[15:0] + 16'd4),
+        .v_total(VTOTAL[15:0]), .v_active(H[15:0]),
+        .v_sync_begin(H[15:0] + 16'd1), .v_sync_end(H[15:0] + 16'd2),
+        .h_sync_pos(1'b1), .v_sync_pos(1'b1),
+        .hcount(hcount), .vcount(vcount), .hsync(), .vsync(), .de(de),
+        .line_start(line_start), .frame_start(frame_start));
+    reg fetch_fs = 1'b0, warm = 1'b0;
+    always @(posedge pix_clk) begin
+        fetch_fs <= (vcount == H) && (hcount == 16'd0);
+        if (fetch_fs) warm <= 1'b1;
     end
 
     // track time the reader spends in FWAIT (fstate 3) consecutively
@@ -147,6 +155,11 @@ module groovy_linebuf_handshake_tb;
             $display(">>> BUG REPRODUCED: %0d rd pulses swallowed (reader -> FWAIT, controller ignored rd)", ignored_rd);
         if (fwait_max > 100)
             $display(">>> FWAIT STALL: reader stuck in FWAIT up to %0d cycles (HW saw ~65535)", fwait_max);
+        // every frame must be fetched again (fetch_fs restarts it): >= 3 frames of words
+        if (ignored_rd == 0 && fwait_max <= 100 && accepted >= 3*W*H)
+            $display("PASS: groovy_linebuf_handshake_tb");
+        else
+            $display("FAIL: groovy_linebuf_handshake_tb");
         $finish;
     end
     initial begin #5000000; $display("timeout"); $finish; end

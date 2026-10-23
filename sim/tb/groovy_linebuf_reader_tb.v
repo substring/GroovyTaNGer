@@ -1,23 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Self-checking tb for rtl/core/groovy_linebuf_reader.v
-// Models a small DDR3 (8-word reads) holding mem[a] = a + 1, drives a realistic
-// frame (frame_start + per-line line_start with blanking), and checks scanout
-// pixels match the stored line for several lines.
+// Models a small DDR3 (8-word reads) holding mem[a] = a + 1, drives the real
+// video_timing_gen with fetch_fs made exactly like the real tops, and checks scanout
+// pixels match the stored line for several frames.
 `timescale 1ns/1ps
 module groovy_linebuf_reader_tb;
     // LINE_W > W (active) and HTOTAL > W, like the real design (buffer depth
     // exceeds h_active so the last column's read pipeline never wraps the index).
     // VTOTAL > H gives vertical blanking, during which the fetch PRELOADS the
-    // first lines before active video starts (exactly like real timing - the
-    // line buffer must be filled ahead of the beam).
+    // first lines of the next frame (fetch_fs restarts it at vblank start).
     localparam W = 16, H = 6, HTOTAL = 40, VTOTAL = 10, LINE_W = 32, LW = 5, AW = 26;
 
     reg pix_clk=0; always #7 pix_clk=~pix_clk;
     reg pclk=0;    always #5 pclk=~pclk;
 
     reg pix_rst=1, pclk_rst=1;
-    reg [15:0] hcount=0, vcount=0;
-    reg de=0, line_start=0, frame_start=0;
+    reg run_raster = 0;
     wire [15:0] pix_rgb;
 
     wire        rd;
@@ -32,7 +30,8 @@ module groovy_linebuf_reader_tb;
     groovy_linebuf_reader #(.LINE_W(LINE_W), .LW_ADDR(LW), .DDR_AW(AW), .SINGLE_WORD(0)) dut (
         .pix_clk(pix_clk), .pix_rst(pix_rst), .h_active(W[15:0]), .v_active(H[15:0]),
         .hcount(hcount), .vcount(vcount), .de(de),
-        .line_start(line_start), .frame_start(frame_start), .pix_rgb565(pix_rgb),
+        .line_start(line_start), .frame_start(frame_start), .fetch_fs(fetch_fs),
+        .pix_rgb565(pix_rgb),
         .pclk(pclk), .pclk_rst(pclk_rst), .base_addr(26'd0),
         .rd(rd), .addr(addr), .busy(busy), .data_ready(data_ready),
         .dout128(dout128), .dout(16'd0),
@@ -57,34 +56,27 @@ module groovy_linebuf_reader_tb;
         end
     end
 
-    // ---- free-running raster, exactly like video_timing_gen ----
-    // h: 0..HTOTAL-1 (active 0..W-1, then back porch). line_start pulses at h==0,
-    // frame_start at (h==0 && v==0). de high during active. This drives the DUT
-    // with real timing (a full blanking gap before each line_start), so there is
-    // no artificial back-to-back line boundary.
-    // raw raster line vraw: 0..VTOTAL-1. Vertical blank is the first VB lines;
-    // active video is vraw in [VB, VB+H). The DUT's vcount input is the ACTIVE
-    // line index (vraw - VB), matching the bank tags (0..H-1). During vblank the
-    // fetch preloads the first lines. line_start pulses every line (so the fetch
-    // is paced per line); frame_start at the very top (vraw==0).
-    localparam VB = VTOTAL - H;          // = 4 vblank lines at top
-    reg [15:0] vraw = 0;
-    reg run_raster = 0;
-    wire active_line = (vraw >= VB);
+    // ---- raster: the real video_timing_gen, wired like gwddr3video/gwddr3net_top ----
+    // Active video first (vcount 0..H-1), blanking after. frame_start is the registered
+    // pulse WITH the first active pixel; fetch_fs is the tops' registered pulse at the
+    // start of vertical blanking (vcount == H, hcount == 0). The raster starts at (0,0)
+    // when run_raster rises, so frame 0 is a cold start with no vblank pre-fill; `warm`
+    // rises at the first fetch_fs and the check starts from the next frame.
+    wire [15:0] hcount, vcount;
+    wire        de, line_start, frame_start;
+    video_timing_gen u_vtg (
+        .clk(pix_clk), .rst(pix_rst), .en(run_raster),
+        .h_total(HTOTAL[15:0]), .h_active(W[15:0]),
+        .h_sync_begin(W[15:0] + 16'd2), .h_sync_end(W[15:0] + 16'd4),
+        .v_total(VTOTAL[15:0]), .v_active(H[15:0]),
+        .v_sync_begin(H[15:0] + 16'd1), .v_sync_end(H[15:0] + 16'd2),
+        .h_sync_pos(1'b1), .v_sync_pos(1'b1),
+        .hcount(hcount), .vcount(vcount), .hsync(), .vsync(), .de(de),
+        .line_start(line_start), .frame_start(frame_start));
+    reg fetch_fs = 1'b0, warm = 1'b0;
     always @(posedge pix_clk) begin
-        if (run_raster) begin
-            if (hcount == HTOTAL-1) begin
-                hcount <= 0;
-                vraw   <= (vraw == VTOTAL-1) ? 0 : vraw + 1;
-            end else hcount <= hcount + 1;
-        end
-    end
-    // DUT inputs
-    always @(*) begin
-        vcount      = active_line ? (vraw - VB) : 16'd0;
-        de          = run_raster && active_line && (hcount < W);
-        line_start  = run_raster && (hcount == 0) && active_line;
-        frame_start = run_raster && (hcount == 0) && (vraw == 0);
+        fetch_fs <= (vcount == H) && (hcount == 16'd0);
+        if (fetch_fs) warm <= 1'b1;
     end
 
     // checker: push the EXPECTED pixel + a valid flag down a shift register the
@@ -107,7 +99,7 @@ module groovy_linebuf_reader_tb;
     end
     integer checked = 0;
     always @(posedge pix_clk) begin
-        if (run_raster && exp_pipe[PIPE][16]) begin   // valid pixel at pipe end
+        if (run_raster && warm && exp_pipe[PIPE][16]) begin   // valid pixel at pipe end
             if (pix_rgb !== exp_pipe[PIPE][15:0]) begin
                 $display("FAIL v=%0d col=%0d: got %h exp %h",
                          exp_lin_pipe[PIPE], exp_col_pipe[PIPE], pix_rgb, exp_pipe[PIPE][15:0]);
@@ -121,11 +113,11 @@ module groovy_linebuf_reader_tb;
         repeat (4) @(negedge pclk); pclk_rst=0; pix_rst=0;
         repeat (4) @(negedge pix_clk);
         run_raster = 1;                       // start the raster + fetch
-        // run for ~3 full frames so banks recycle many times
-        repeat (3*VTOTAL*HTOTAL + 50) @(negedge pix_clk);
+        // cold frame 0, then 3 checked frames so banks recycle many times
+        repeat (4*VTOTAL*HTOTAL + 50) @(negedge pix_clk);
         run_raster = 0;
 
-        if (errors==0 && checked > 2*W*(H-1))
+        if (errors==0 && checked >= 3*W*H)
             $display("PASS: groovy_linebuf_reader_tb (%0d pixels checked)", checked);
         else begin
             $display("FAIL: groovy_linebuf_reader_tb (%0d errors, %0d checked)", errors, checked);
