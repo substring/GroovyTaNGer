@@ -381,7 +381,8 @@ class AudioSource:
     """PCM for blitrace --audio: 48 kHz stereo signed 16-bit LE, one video frame's worth
     (800 samples = 3200 bytes at 60 Hz) per call.
       tone : 440 Hz on the left, 660 Hz on the right (checks the channel order)
-      video: the soundtrack of --video, decoded by ffmpeg (silence if it has none)"""
+      video: the soundtrack of --video, decoded by ffmpeg (silence if it has none)
+      silence: zeros with the audio path and amplifier on (noise-floor check)"""
     RATE = 48000
     def __init__(self, kind, refresh, video_path=None):
         import numpy as np, queue, subprocess, threading
@@ -411,6 +412,8 @@ class AudioSource:
 
     def next(self):
         np = self.np
+        if self.kind == "silence":
+            return bytes(self.per_frame * 4)
         if self.kind == "tone":
             n = np.arange(self.t, self.t + self.per_frame) / self.RATE
             self.t += self.per_frame
@@ -864,7 +867,7 @@ def main():
     br.add_argument("--video", default=None,
                     help="stream a video file (any format ffmpeg reads), scaled + cropped to "
                          "--width x --height at --refresh fps, looping at the end")
-    br.add_argument("--audio", choices=["tone", "video"], default=None,
+    br.add_argument("--audio", choices=["tone", "video", "silence"], default=None,
                     help="send sound too (48 kHz stereo, CMD_AUDIO after each frame): "
                          "tone = 440 Hz left / 660 Hz right, video = the --video soundtrack")
     br.add_argument("--image", default=None,
