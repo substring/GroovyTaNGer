@@ -92,6 +92,13 @@ stops answering, button S0 resets it without reflashing.
    ideally a video buffer amp, or an ADV7123/ADV7125 module. Ready-made option noted by the
    user: the ALIENTEK **ATK-RGB2VGA** module (RGB LCD FPC -> VGA) - check that its FPC
    pinout matches the Dock's and how many bits per colour it takes before buying.
+11. *(option)* **RGB888 end to end**: today the whole path is RGB565 (`blit_rx` packs the
+   host's RGB888 to 565 to fit the ring), and the Dock's RGB LCD connector only wires 5/6/5
+   data lines, so it can never output more than 565. 888 would need (a) a 24-bit ring (about
+   +50 % BSRAM for the 32 lines; 33/46 used today) and (b) for the CRT, 24 data pins from the
+   Dock's free expansion pins to our own DAC (e.g. an ADV7123 module) instead of the FPC; DVI
+   already carries 8 bits per colour. 565 covers most arcade boards (4-6 bits per channel);
+   later games' gradients would show banding.
 
 ## Parked
 
