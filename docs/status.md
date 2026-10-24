@@ -68,7 +68,8 @@ stops answering, button S0 resets it without reflashing.
    frames (N to define), blank the ring. Today the last ring lap stays on screen: after a
    stream ends the UART shows `GL=0060` = 96 output lines (32 source lines) still valid.
 7. **Screensaver based on the GroovyArcade logo** when no stream is coming (after the ring
-   is cleared). Logo asset and its licence to check before embedding it.
+   is cleared). The user maintains GroovyArcade: the logo is theirs and they choose its
+   licence (ask which one to state in the repo when the asset is added).
 8. **HDMI audio**: add an open HDMI encoder (data islands) **next to** the Gowin DVI_TX,
    both kept and selectable; then advertise/select the audio output (HDMI or jack, with a
    default) in protocol v2 (planned in `docs/protocol_v2_features.md`).
