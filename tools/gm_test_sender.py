@@ -550,7 +550,12 @@ def send_blitrace(sock, addr, args):
         t_vsync = time.perf_counter()
     elif bclk is None:
         print(f"phase lock: next FPGA vsync in {(t_vsync-time.perf_counter())*1e3:.2f}ms")
-    lock = "FPGA raster beacons" if bclk is not None else f"polled vCount, resync {args.resync_hz}Hz"
+    if bclk is not None and bclk.last_vsync is not None:
+        lock = "FPGA raster beacons"
+    elif bclk is not None:
+        lock = "NO beacon yet - free-running until one arrives"
+    else:
+        lock = f"polled vCount, resync {args.resync_hz}Hz"
     print(f"pacing: {args.pace}, line_period={line_period*1e6:.1f}us {lpd} line/dgram, "
           f"lead {args.lead} lines, phase-locked to the FPGA raster ({lock})")
     if args.frames < 30:
