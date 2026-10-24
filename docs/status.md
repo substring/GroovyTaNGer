@@ -76,6 +76,16 @@ stops answering, button S0 resets it without reflashing.
 9. *(low priority)* **Adjustable audio latency**: if an HDMI->VGA converter adds video lag,
    delay the sound to match. The audio buffer can do it: a configurable pre-roll / fixed
    delay in samples (build parameter first, then maybe a v2 protocol setting).
+10. **Analog RGB out through the Dock's RGB LCD connector** (user idea, 2026-10-24): a
+   native-clock path to the CRT with no HDMI 25 MHz floor and no converter lag. The
+   connector carries RGB565 + HS/VS/DE + pixel clock in LVCMOS 3.3 V: R L9 N8 N9 N7 N6,
+   G D11 A11 B11 P7 R7 D10, B B12 C12 B13 A14 B14, DCLK R9, HS A15, VS D14, DE E15 (Sipeed
+   `TangPrimer-20K-example/RGB_lcd`, whose 480x272 example already runs at ~9 MHz). No pin
+   clash with Ethernet, audio or LEDs. FPGA side: route the ring's RGB565 + our timing to
+   these pins (composite sync on HS for SCART/JAMMA), pixel clock from the dynamic PLL.
+   Hardware: 40-pin 0.5 mm FPC -> 2.54 mm breakout (pinout to confirm on the Dock
+   schematic / Sipeed screen datasheet), a resistor DAC per channel for 0.7 Vpp into 75 ohm,
+   ideally a video buffer amp, or an ADV7123/ADV7125 module.
 
 ## Parked
 
