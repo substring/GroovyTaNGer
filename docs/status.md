@@ -64,7 +64,12 @@ stops answering, button S0 resets it without reflashing.
 5. **Interlaced modes** still to validate: SWITCHRES `interlace` flag and the BLIT `field`
    byte are decoded by the parser but not used; the ring and the raster must handle two
    half-height fields (odd/even lines, half-line offset between fields).
-6. **HDMI audio**: add an open HDMI encoder (data islands) **next to** the Gowin DVI_TX,
+6. **Clear the line ring when the stream stops**: if no line arrives for more than N video
+   frames (N to define), blank the ring. Today the last ring lap stays on screen: after a
+   stream ends the UART shows `GL=0060` = 96 output lines (32 source lines) still valid.
+7. **Screensaver based on the GroovyArcade logo** when no stream is coming (after the ring
+   is cleared). Logo asset and its licence to check before embedding it.
+8. **HDMI audio**: add an open HDMI encoder (data islands) **next to** the Gowin DVI_TX,
    both kept and selectable; then advertise/select the audio output (HDMI or jack, with a
    default) in protocol v2 (planned in `docs/protocol_v2_features.md`).
 
