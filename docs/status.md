@@ -73,6 +73,9 @@ stops answering, button S0 resets it without reflashing.
 8. **HDMI audio**: add an open HDMI encoder (data islands) **next to** the Gowin DVI_TX,
    both kept and selectable; then advertise/select the audio output (HDMI or jack, with a
    default) in protocol v2 (planned in `docs/protocol_v2_features.md`).
+9. *(low priority)* **Adjustable audio latency**: if an HDMI->VGA converter adds video lag,
+   delay the sound to match. The audio buffer can do it: a configurable pre-roll / fixed
+   delay in samples (build parameter first, then maybe a v2 protocol setting).
 
 ## Parked
 
@@ -80,6 +83,3 @@ stops answering, button S0 resets it without reflashing.
 rework `groovy_gwddr3_port.v`), but whenever the DDR3 controller runs the HDMI output shows
 crawling wrong pixels on some colours. Full investigation and next ideas:
 `docs/hdmi_ddr3_interference.md`.
-9. *(low priority)* **Adjustable audio latency**: if an HDMI->VGA converter adds video lag,
-   delay the sound to match. The audio buffer can do it: a configurable pre-roll / fixed
-   delay in samples (build parameter first, then maybe a v2 protocol setting).
