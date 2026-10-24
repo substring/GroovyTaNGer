@@ -1,4 +1,4 @@
-# Groovy_Tang — status and resume point (2026-10-24)
+# Groovy_Tang — status and resume point (2026-10-24, evening)
 
 Branch: `ddr3-audit` (not pushed). Everything below is committed.
 
@@ -12,6 +12,9 @@ hold the lock (LT=14) with no drift.
 - Ring: `rtl/core/groovy_linering.v` (writer never waits, free-running raster, per-slot
   line tags). Network: `udp.sv` fixes (back-to-back frames, header-FIFO reject test,
   TX framing race, 1 ms TX hold-off), `groovy_udp_rx_framer.v`, `groovy_tx_arbiter.v`.
+- **Audio on the Dock's 3.5 mm jack**: CMD_AUDIO PCM -> 4096-word buffer -> PT8211 DAC
+  (`rtl/core/groovy_audio.v`; WS low = right, heard on the board). A game video plays
+  with its soundtrack in sync: "ça marche super bien".
 - **Raster beacon** (protocol extension `CMD_SET_BEACON`, code 11, opt-in): the FPGA pushes
   its raster phase once per video frame; the sender locks on the kernel receive timestamp
   (phase error a few us). See `docs/protocol_v2_features.md`.
@@ -21,13 +24,17 @@ hold the lock (LT=14) with no drift.
 ```bash
 sudo ip addr add 192.168.15.15/24 dev enp6s0        # PC on the board's subnet (temporary)
 openFPGALoader -b tangprimer20k rtl/board/tang_primer_20k/gwline/impl/pnr/gwline.fs
-python3 tools/gm_test_sender.py --host 192.168.15.14 blitrace --video video.mp4 --frames 3600 --beacon
+python3 tools/gm_test_sender.py --host 192.168.15.14 blitrace --video video.mp4 --audio video --frames 3600 --beacon
 ```
 Build first if `impl/` is empty: `tools/gw_build.sh rtl/board/tang_primer_20k/gwline/gwline.gprj`
-(retry on "License verification failed"). Other sources: `--anim scroll --image <png>`,
+(retry on "License verification failed"). `--audio tone` = 440 Hz left / 660 Hz right
+(channel check). The PC's 192.168.15.15 address can vanish when the link resets
+(NetworkManager): re-add it. After a USB re-enumeration the UART is back at 9600 bauds:
+`stty -F /dev/ttyUSB1 115200 raw -echo`. Other sources: `--anim scroll --image <png>`,
 `--anim bars`, `--pattern hbars`. Ctrl+C prints the summary. A line ring shows nothing once
 the stream stops: a blank screen at the end is normal. Debug UART: `/dev/ttyUSB1` 115200
-(`GL=02D0` = all 720 lines valid, `LT` = writer lead, `TO`/`RJ` must stay 0). If the board
+(`GL=02D0` = all 720 lines valid, `LT` = writer lead, `TO`/`RJ` must stay 0, `AL` audio
+buffer level, `AU` audio underruns). If the board
 stops answering, button S0 resets it without reflashing.
 
 ## Tests
@@ -40,9 +47,9 @@ stops answering, button S0 resets it without reflashing.
 
 ## Open, in the order agreed with the user
 
-1. **Audio through the Dock's 3.5 mm jack — priority.** Protocol already carries audio
-   (CMD_INIT soundRate/chan + CMD_AUDIO). First step: find the jack's driver chip on the
-   Dock schematic.
+1. **Audio clock drift**: the DAC plays at the PHY's 50 MHz crystal rate, the host sends
+   at the raster rate (27 MHz crystal): over long sessions the buffer will slowly fill or
+   drain. Needs rate adaptation (or reporting the level so the host adapts). Not done.
 2. **Conformance with the original Groovy_MiSTer protocol** before plugging GroovyMAME in:
    re-check `docs/protocol_verified.md` against what the FPGA does now (known gap: the ACK
    always reports `fpga frame=0`).
