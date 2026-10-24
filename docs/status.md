@@ -99,6 +99,13 @@ stops answering, button S0 resets it without reflashing.
    Dock's free expansion pins to our own DAC (e.g. an ADV7123 module) instead of the FPC; DVI
    already carries 8 bits per colour. 565 covers most arcade boards (4-6 bits per channel);
    later games' gradients would show banding.
+12. **CRT output: a real trade-off to choose (and document for users)**:
+   - **"pure VGA" through the RGB LCD connector**: RGB565 at most (the FPC wires 5/6/5),
+     but native pixel clock, no converter lag, interlace exactly as generated;
+   - **RGB888 through HDMI + an HDMI->VGA converter**: full 8 bits per colour (once the ring
+     is 24-bit, item 11), but the converter may impose a ~25 MHz minimum (super-resolution),
+     add lag (audio latency, item 9) and reject or deinterlace interlaced modes.
+   (RGB888 *and* native analog would need our own DAC on free pins, item 11.)
 
 ## Parked
 
