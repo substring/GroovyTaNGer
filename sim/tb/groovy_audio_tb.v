@@ -11,7 +11,7 @@ module groovy_audio_tb;
     reg start = 0; reg [15:0] size = 0; reg in_valid = 0; reg [7:0] in_data = 0;
     wire receiving, bck, ws, din, pa_en, playing;
     wire [15:0] und, ovf, tmo; wire [12:0] level;
-    groovy_audio #(.AW(12), .PREROLL(64)) dut (
+    groovy_audio #(.AW(12), .PREROLL(64), .PA_HOLD_CYCLES(100_000)) dut (
         .clk(clk), .rst(rst), .cfg_rate(rate), .cfg_chan(chan),
         .start(start), .size_bytes(size), .in_valid(in_valid), .in_data(in_data),
         .receiving(receiving), .hp_bck(bck), .hp_ws(ws), .hp_din(din), .pa_en(pa_en),
@@ -52,7 +52,10 @@ module groovy_audio_tb;
     initial begin
         repeat (5) @(posedge clk); rst = 0;
         // ---------------- stereo: words L,R,L,R...: L = 0x1000+2i, R = 0x1000+2i+1
+        if (pa_en) begin errs = errs + 1; $display("PA_EN on before any sound"); end
         send_audio(400, 16'h1000);
+        #3000000;
+        if (!pa_en) begin errs = errs + 1; $display("PA_EN off while playing"); end
         #(400.0 / 2 * 20833.3 + 300000);
         // first decoded pair carrying data
         first_nz = -1;
@@ -73,7 +76,8 @@ module groovy_audio_tb;
         if (nz != 200) errs = errs + 1;
         if (und != 1) begin errs = errs + 1; $display("underruns %0d, want exactly 1 (end of data)", und); end
         if ((t_last - t_first) / (n_rt - 1) < 20800 || (t_last - t_first) / (n_rt - 1) > 20870) errs = errs + 1;
-        if (!pa_en) errs = errs + 1;
+        // amplifier: off before any sound, on while playing, off PA_HOLD (2 ms here) after
+        if (pa_en) begin errs = errs + 1; $display("PA_EN still on long after playback"); end
         // ---------------- mono: each word on both channels
         chan = 2'd1;  i0 = nl;
         send_audio(100, 16'h4000);

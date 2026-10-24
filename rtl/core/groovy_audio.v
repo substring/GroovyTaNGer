@@ -28,7 +28,8 @@ module groovy_audio #(
     parameter integer AW             = 12,       // buffer: 4096 words
     parameter integer PREROLL        = 1600,     // words before playback (re)starts
     parameter integer TIMEOUT_CYCLES = 400_000,  // 8 ms at 50 MHz, as gwline's blit_rx
-    parameter         LR_SWAP        = 1'b0      // 1: first word of a pair -> right
+    parameter         LR_SWAP        = 1'b0,     // 1: first word of a pair -> right
+    parameter integer PA_HOLD_CYCLES = 50_000_000 // amplifier stays on 1 s after playback
 ) (
     input  wire        clk,                 // 50 MHz
     input  wire        rst,
@@ -118,7 +119,16 @@ module groovy_audio #(
         else {tick, acc} <= {1'b0, acc} + {1'b0, inc};
     end
 
-    assign pa_en = (cfg_rate != 2'd0);
+    // Amplifier only while sound is actually played (+ PA_HOLD_CYCLES, so gaps between
+    // bursts do not click). Enabled whenever a rate was configured, it amplified the DAC's
+    // idle output for the whole session: a loud hiss with no sound playing (HW).
+    reg [31:0] pa_hold;
+    always @(posedge clk) begin
+        if (rst || cfg_rate == 2'd0) pa_hold <= 32'd0;
+        else if (play)              pa_hold <= PA_HOLD_CYCLES;
+        else if (pa_hold != 32'd0)  pa_hold <= pa_hold - 32'd1;
+    end
+    assign pa_en = (cfg_rate != 2'd0) && (play || pa_hold != 32'd0);
     wire   mono  = (cfg_chan == 2'd1);
     reg        play;  assign playing = play;
     reg [4:0]  bitn;                         // bit slot 0..31 of the stereo sample
