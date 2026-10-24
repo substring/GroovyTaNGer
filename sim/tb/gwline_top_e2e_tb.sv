@@ -35,7 +35,9 @@ module gwline_top_e2e_tb;
     wire [5:0] led;  wire uart_txp;
     gwline_top dut (.clk(clk27), .rst(rst_n), .netrmii(netrmii), .phyrst(),
                     .O_tmds_clk_p(), .O_tmds_clk_n(), .O_tmds_data_p(), .O_tmds_data_n(),
-                    .led(led), .uart_txp(uart_txp));
+                    .led(led), .uart_txp(uart_txp),
+                    .HP_BCK(hp_bck), .HP_WS(hp_ws), .HP_DIN(hp_din), .PA_EN(pa_en));
+    wire hp_bck, hp_ws, hp_din, pa_en;
 
     function automatic [15:0] pix(input integer f, input integer l, input integer c);
         pix = (l * 16'h9E37) ^ (c * 16'h7F4B) ^ (f * 16'h1D2F) ^ 16'h5A5A;
@@ -67,7 +69,7 @@ module gwline_top_e2e_tb;
         begin if ($realtime < t) #(t - $realtime); @(posedge clk50m); end
     endtask
 
-    integer i, f, d, hdr, n_status_sent = 0;  real t0;  reg sender_done = 0;  real beacon_on_at = -1.0;
+    integer i, f, d, hdr, n_status_sent = 0, n_audio_bursts = 0;  real t0;  reg sender_done = 0;  real beacon_on_at = -1.0;
     initial begin
         void'($value$plusargs("DIR=%s", dir));
         void'($value$plusargs("LEAD=%d", lead));
@@ -108,7 +110,11 @@ module gwline_top_e2e_tb;
                 wait_until(t0 + f * FRAME_T + d * DGRAM_T);
                 send_eth(i);  i = i + 1;
             end
-            // optional CMD_GET_STATUS burst between frames: replies close together
+            // after the pixels: optional audio burst (CMD_AUDIO + PCM), then the optional
+            // CMD_GET_STATUS burst (replies close together)
+            while (i < nframes_eth && (sidx[i][63:56] == 8'd6 || sidx[i][63:56] == 8'd7)) begin
+                #2000;  send_eth(i);  i = i + 1;  if (sidx[i-1][63:56] == 8'd6) n_audio_bursts = n_audio_bursts + 1;
+            end
             while (i < nframes_eth && sidx[i][63:56] == 8'd4) begin
                 #2000;  send_eth(i);  i = i + 1;  n_status_sent = n_status_sent + 1;
             end
@@ -227,6 +233,30 @@ module gwline_top_e2e_tb;
         end
     end
 
+    // ------------------------------------------------------------ audio at the DAC pins
+    // PT8211 stream decoded as the DAC reads it (BCK rising edge, WS low = right, MSB
+    // first); stream sample k must be L = 2k, R = 2k + 1. Leading silence is skipped.
+    reg aws_q = 1; reg [15:0] aacc = 0; integer anb = 0, a_pairs = 0, a_bad = 0, a_l = -1;
+    always @(posedge hp_bck) begin
+        if (hp_ws != aws_q) begin
+            if (anb == 16) begin
+                if (aws_q == 0) a_l = aacc;              // WS low slot = RIGHT (held in a_l)
+                else if (a_l >= 0 && !(a_pairs == 0 && a_l == 0 && aacc == 0)) begin
+                    // here aacc = left, a_l = right of the same stereo sample
+                    if (aacc != ((2 * a_pairs) & 16'hFFFF) || a_l != ((2 * a_pairs + 1) & 16'hFFFF)) begin
+                        if (!(a_l == 0 && aacc == 0)) begin                  // silence = underrun, counted by the DUT
+                            if (a_bad < 5) $display("AUDIO: pair %0d got L=%h R=%h", a_pairs, aacc, a_l);
+                            a_bad = a_bad + 1;
+                        end
+                    end
+                    if (!(a_l == 0 && aacc == 0)) a_pairs = a_pairs + 1;
+                end
+            end
+            anb = 0;  aacc = 0;
+        end
+        aacc = {aacc[14:0], hp_din};  anb = anb + 1;  aws_q = hp_ws;
+    end
+
     // ------------------------------------------------------------ raster beacons (clk50m)
     // Every datagram the top hands to udp.sv, rebuilt from the arbiter's byte stream.
     // A beacon (16 bytes, "GTB1") must come once per video frame, built when the raster
@@ -263,9 +293,13 @@ module gwline_top_e2e_tb;
             $display("BEACON %0d beacons over %0d video frames since enabled, %0d errors; while streaming GL %0d..%0d LT %0d..%0d",
                      n_beacon, $rtoi(($realtime - beacon_on_at) / FRAME_T), bc_err,
                      bc_gl_min, bc_gl_max, bc_lt_min, bc_lt_max);
+        if (n_audio_bursts > 0)
+            $display("AUDIO %0d bursts sent, %0d stereo samples played in order, %0d wrong; DUT underruns=%0d level=%0d playing=%0d",
+                     n_audio_bursts, a_pairs, a_bad, dut.a_underruns, dut.a_level, dut.a_playing);
         $display("TX %0d frames on the wire: %0d BAD, %0d UDP (%0d ACK-sized, %0d beacons), %0d ARP; %0d status requests sent; beacon trigger->wire max %0.1f us",
                  tx_frames, tx_bad, tx_udp, tx_acks, tx_beacons, tx_arp, n_status_sent, bc_delay_max / 1000.0);
         if (perfect_frames == nf_net && dut.frame_cnt == nf_net && dut.to_cnt == 0 && tx_bad == 0 &&
+            (n_audio_bursts == 0 || (a_pairs > 0 && a_bad == 0)) &&
             (beacon_on_at < 0 || (n_beacon >= $rtoi(($realtime - beacon_on_at) / FRAME_T) - 1 && bc_err == 0)))
              $display("PASS: gwline_top_e2e_tb");
         else $display("FAIL: gwline_top_e2e_tb");

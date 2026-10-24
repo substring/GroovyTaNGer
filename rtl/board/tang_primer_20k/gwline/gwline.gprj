@@ -22,6 +22,7 @@
         <File path="../../../core/groovy_features.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_tx_arbiter.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_beacon_sender.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_audio.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_switchres.v" type="file.verilog" enable="1"/>
         <File path="../../../core/pclk_double_to_khz.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_pll_solver.v" type="file.verilog" enable="1"/>

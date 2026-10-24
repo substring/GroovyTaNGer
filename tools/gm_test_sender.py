@@ -377,6 +377,56 @@ class VideoFrames:
         return self.last
 
 
+class AudioSource:
+    """PCM for blitrace --audio: 48 kHz stereo signed 16-bit LE, one video frame's worth
+    (800 samples = 3200 bytes at 60 Hz) per call.
+      tone : 440 Hz on the left, 660 Hz on the right (checks the channel order)
+      video: the soundtrack of --video, decoded by ffmpeg (silence if it has none)"""
+    RATE = 48000
+    def __init__(self, kind, refresh, video_path=None):
+        import numpy as np, queue, subprocess, threading
+        self.np = np
+        self.per_frame = round(self.RATE / refresh)
+        self.kind, self.t = kind, 0
+        self.q = None
+        if kind == "video":
+            self.q = queue.Queue(maxsize=600)
+            self.stop = False
+            def run():
+                while not self.stop:
+                    p = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-i", video_path, "-vn",
+                                          "-f", "s16le", "-ac", "2", "-ar", str(self.RATE), "-"],
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    got = 0
+                    while not self.stop:
+                        b = p.stdout.read(self.per_frame * 4)
+                        if len(b) < self.per_frame * 4: break
+                        got += 1
+                        while not self.stop:
+                            try: self.q.put(b, timeout=0.1); break
+                            except queue.Full: pass
+                    p.kill(); p.wait()
+                    if got == 0: return
+            self.th = threading.Thread(target=run, daemon=True); self.th.start()
+
+    def next(self):
+        np = self.np
+        if self.kind == "tone":
+            n = np.arange(self.t, self.t + self.per_frame) / self.RATE
+            self.t += self.per_frame
+            l = (0.25 * 32767 * np.sin(2 * np.pi * 440 * n)).astype("<i2")
+            r = (0.25 * 32767 * np.sin(2 * np.pi * 660 * n)).astype("<i2")
+            return np.stack([l, r], 1).tobytes()
+        try:
+            return self.q.get_nowait()
+        except Exception:
+            return bytes(self.per_frame * 4)                # decoder late / no soundtrack
+
+    def close(self):
+        if self.q is not None:
+            self.stop = True
+
+
 CMD_SET_BEACON = 11      # Groovy_Tang extension: {11, enable} -> 16-byte "GTB1" raster beacons
 SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)   # Linux; Python does not export it
 
@@ -490,8 +540,14 @@ def send_blitrace(sock, addr, args):
               f"{len(frames_loop)} frames precomputed in {time.perf_counter() - t:.1f}s")
 
     line_bytes = w * 2                                     # RGB565 = 2 B/px
+    audio = None
+    if args.audio:
+        audio = AudioSource(args.audio, args.refresh, args.video)
+        print(f"audio: {args.audio}, 48 kHz stereo, {audio.per_frame} samples per frame "
+              f"(CMD_AUDIO after each frame's pixels)")
     sock.settimeout(0.5)
-    sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 0, 2, 2), addr)   # rgb565
+    # CMD_INIT: lz4 0, sound rate code (3 = 48000, 0 = none), 2 channels, RGB565
+    sock.sendto(struct.pack("<BBBBB", CMD_INIT, 0, 3 if audio else 0, 2, 2), addr)
     try: print(decode_reply(sock.recvfrom(64)[0]))
     except socket.timeout: print("(no INIT ack)")
 
@@ -600,6 +656,11 @@ def send_blitrace(sock, addr, args):
                 sent += n
                 t_line += period
                 _pace_until(t_line)
+            if audio is not None:                             # this frame's sound, right after
+                pcm = audio.next()                            # its pixels (vertical blanking)
+                sock.sendto(struct.pack("<BH", 4, len(pcm)), addr)          # CMD_AUDIO
+                for o in range(0, len(pcm), 1440):
+                    sock.sendto(pcm[o:o + 1440], addr)
             t_vsync += frame_period                           # next frame's vsync (predicted)
             sent_frames = f + 1
 
@@ -634,6 +695,8 @@ def send_blitrace(sock, addr, args):
         print("\n(interrupted)")
     frames = sent_frames
     print(f"blitrace: {frames} frame(s) {w}x{h}, phase-locked -> {addr[0]}:{addr[1]}")
+    if audio is not None:
+        audio.close()
     if video is not None:
         video.close()
         print(f"video: decoder late on {video.late} frame(s) (previous frame repeated), "
@@ -801,6 +864,9 @@ def main():
     br.add_argument("--video", default=None,
                     help="stream a video file (any format ffmpeg reads), scaled + cropped to "
                          "--width x --height at --refresh fps, looping at the end")
+    br.add_argument("--audio", choices=["tone", "video"], default=None,
+                    help="send sound too (48 kHz stereo, CMD_AUDIO after each frame): "
+                         "tone = 440 Hz left / 660 Hz right, video = the --video soundtrack")
     br.add_argument("--image", default=None,
                     help="picture for --anim scroll, fitted (cover + centre-crop) to "
                          "--width x --height without switchres")

@@ -16,7 +16,11 @@
 #   stream_idx.hex    one 64-bit word per Ethernet frame: {kind[7:0], len[23:0], offset[31:0]}
 #                     kind: 0 = INIT, 1 = BLIT header, 2 = pixel datagram,
 #                           3 = CMD_SET_BEACON 1 (--beacon: right after INIT),
-#                           5 = ARP request from the host (always first)
+#                           5 = ARP request from the host (always first),
+#                           6 = CMD_AUDIO header, 7 = audio payload datagram (--audio N:
+#                               N stereo 16-bit samples per frame, after its pixels; CMD_INIT
+#                               then announces 48 kHz stereo). Sample k of the stream:
+#                               L = 2k, R = 2k + 1 (mod 65536), checked by the testbench.
 #                           4 = CMD_GET_STATUS (--status-burst N: N of them after each
 #                               frame's last pixel datagram, back to back)
 import argparse, os, struct
@@ -45,12 +49,16 @@ def main():
     p.add_argument("--lines-per-dgram", type=int, default=2)
     p.add_argument("--beacon", action="store_true",
                    help="enable the FPGA raster beacon (CMD_SET_BEACON 1) after CMD_INIT")
+    p.add_argument("--audio", type=int, default=0,
+                   help="stereo samples per frame (48 kHz: 800); 0 = no audio")
     p.add_argument("--status-burst", dest="status_burst", type=int, default=0,
                    help="CMD_GET_STATUS requests sent back to back after each frame")
     a = p.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
 
-    frames = [(5, build_arp_request()), (0, build_udp_frame(cmd_init()))]
+    frames = [(5, build_arp_request()),
+              (0, build_udp_frame(cmd_init(sound_rate=3 if a.audio else 0, sound_chan=2)))]
+    k_audio = 0
     if a.beacon:
         frames.append((3, build_udp_frame(bytes([11, 1]))))   # CMD_SET_BEACON, enable
     for f in range(a.frames):
@@ -60,6 +68,13 @@ def main():
                                for l in range(l0, min(l0 + a.lines_per_dgram, a.height))
                                for c in range(a.width))
             frames.append((2, build_udp_frame(payload)))
+        if a.audio:
+            pcm = b"".join(struct.pack("<HH", (2 * (k_audio + i)) & 0xFFFF,
+                                       (2 * (k_audio + i) + 1) & 0xFFFF) for i in range(a.audio))
+            k_audio += a.audio
+            frames.append((6, build_udp_frame(struct.pack("<BH", 4, len(pcm)))))
+            for o in range(0, len(pcm), 1440):
+                frames.append((7, build_udp_frame(pcm[o:o + 1440])))
         for _ in range(a.status_burst):
             frames.append((4, build_udp_frame(bytes([5]))))
 

@@ -36,7 +36,12 @@ module gwline_top (
     output wire [2:0]  O_tmds_data_p,
     output wire [2:0]  O_tmds_data_n,
     output wire [5:0]  led,
-    output wire        uart_txp      // M11 -> /dev/ttyUSB1 @115200 (debug)
+    output wire        uart_txp,     // M11 -> /dev/ttyUSB1 @115200 (debug)
+    // Dock audio: PT8211 DAC -> amplifier -> 3.5 mm jack
+    output wire        HP_BCK,       // N15
+    output wire        HP_WS,        // P16
+    output wire        HP_DIN,       // P15
+    output wire        PA_EN         // R16, amplifier enable (active high)
 );
     localparam [15:0] OUR_PORT = 16'd32100;
 
@@ -113,6 +118,9 @@ module gwline_top (
     wire        init_valid, close_valid, get_status_valid, blit_valid;
     wire        get_features_valid, get_switchres_valid, switchres_valid, session_active;
     wire        beacon_valid, beacon_en;
+    wire        audio_valid, a_receiving;  wire [15:0] audio_size;
+    wire        a_playing;  wire [15:0] a_underruns;  wire [12:0] a_level;
+    wire [1:0]  cfg_sound_rate, cfg_sound_chan;
     wire [7:0]  i_lz4, i_sr, i_sc, i_rgb;
     wire [31:0] blit_frame;  wire [15:0] blit_vsync;
     wire [63:0] sr_pclk;
@@ -121,18 +129,18 @@ module gwline_top (
 
     groovy_packet_parser u_parser (
         .clk(clk50m), .rst(core_rst),
-        .in_valid(p_valid & ~blitting), .in_data(p_data),
-        .in_sop(p_sop & ~blitting), .in_eop(p_eop & ~blitting),
+        .in_valid(p_valid & ~blitting & ~a_receiving), .in_data(p_data),
+        .in_sop(p_sop & ~blitting & ~a_receiving), .in_eop(p_eop & ~blitting & ~a_receiving),
         .cmd_valid(), .cmd(), .bad_packet(),
         .close_valid(close_valid), .init_valid(init_valid),
-        .switchres_valid(switchres_valid), .audio_valid(), .get_status_valid(get_status_valid),
+        .switchres_valid(switchres_valid), .audio_valid(audio_valid), .get_status_valid(get_status_valid),
         .blit_valid(blit_valid), .get_version_valid(),
         .get_features_valid(get_features_valid), .get_switchres_valid(get_switchres_valid),
         .beacon_valid(beacon_valid), .beacon_en(beacon_en),
         .init_lz4(i_lz4), .init_sound_rate(i_sr), .init_sound_chan(i_sc), .init_rgb_mode(i_rgb),
         .sr_pclk(sr_pclk), .sr_h_active(sr_ha), .sr_h_begin(sr_hb), .sr_h_end(sr_he), .sr_h_total(sr_ht),
         .sr_v_active(sr_va), .sr_v_begin(sr_vb), .sr_v_end(sr_ve), .sr_v_total(sr_vt), .sr_interlace(),
-        .audio_size(),
+        .audio_size(audio_size),
         .blit_frame(blit_frame), .blit_field(), .blit_vsync(blit_vsync),
         .blit_lz4(), .blit_csize(), .blit_flag()
     );
@@ -142,7 +150,7 @@ module gwline_top (
         .init_valid(init_valid), .init_lz4(i_lz4),
         .init_sound_rate(i_sr), .init_sound_chan(i_sc), .init_rgb_mode(i_rgb),
         .close_valid(close_valid), .session_active(session_active),
-        .cfg_lz4(), .cfg_sound_rate(), .cfg_sound_chan(), .cfg_rgb_mode(),
+        .cfg_lz4(), .cfg_sound_rate(cfg_sound_rate), .cfg_sound_chan(cfg_sound_chan), .cfg_rgb_mode(),
         .new_session(), .end_session(), .cfg_bytes_per_pixel(cfg_bpp)
     );
 
@@ -295,7 +303,18 @@ module gwline_top (
         if (gl_s1 == gl_s2) gl_50 <= gl_s2;
     end
     wire picture_ok = (gl_50 == OUT_H[9:0]);       // every output line of the last frame valid
-    assign beamrace_status = {7'd0, ~picture_ok};  // ACK status bit0: picture NOT complete
+    // ACK status bit0: picture NOT complete; bit6 (Groovy_MiSTer "audio"): audio playing
+    assign beamrace_status = {1'b0, a_playing, 5'd0, ~picture_ok};
+
+    // ---- AUDIO (CMD_AUDIO -> buffer -> PT8211 on the Dock jack), see groovy_audio.v.
+    // Its payload bytes are taken here while a_receiving, like the pixels while blitting.
+    groovy_audio u_audio (
+        .clk(clk50m), .rst(core_rst), .cfg_rate(cfg_sound_rate), .cfg_chan(cfg_sound_chan),
+        .start(audio_valid), .size_bytes(audio_size),
+        .in_valid(p_valid & a_receiving), .in_data(p_data), .receiving(a_receiving),
+        .hp_bck(HP_BCK), .hp_ws(HP_WS), .hp_din(HP_DIN), .pa_en(PA_EN),
+        .playing(a_playing), .underruns(a_underruns), .overflows(), .rx_timeouts(),
+        .level(a_level));
 
     // video raster loops (60 Hz, independent of the network), counted in clk50m
     logic vframe_tgl;
@@ -379,11 +398,12 @@ module gwline_top (
 
     // snapshot into the 27 MHz UART domain (debug only: a value caught mid-change shows
     // up as one odd line in the log, nothing more)
-    reg [15:0] q_fc, q_wl, q_rl, q_lt, q_gl, q_to, q_rj, q_vf;  reg q_se, q_tl;
+    reg [15:0] q_fc, q_wl, q_rl, q_lt, q_gl, q_to, q_rj, q_vf, q_al, q_au;  reg q_se, q_tl;
     always @(posedge clk) begin
         q_fc <= frame_cnt;  q_wl <= write_line;  q_rl <= src_line_wr;  q_lt <= lead_top;
         q_gl <= {6'd0, gl_50};  q_to <= to_cnt;  q_rj <= rj_cnt;  q_vf <= vframe_cnt;
         q_se <= rx_seen;  q_tl <= tmds_lock_sync[1];
+        q_al <= {3'd0, a_level};  q_au <= a_underruns;
     end
 
     wire [7:0] tx_din; wire tx_wr, tx_busy;
@@ -393,11 +413,12 @@ module gwline_top (
     function [31:0] hx4; input [15:0] v;
         hx4 = {hxd(v[15:12]), hxd(v[11:8]), hxd(v[7:4]), hxd(v[3:0])};
     endfunction
-    localparam integer DBGLEN = 75;
+    localparam integer DBGLEN = 91;
     wire [8*DBGLEN-1:0] dmsg = {
         "RD=", hx4(q_fc), " WL=", hx4(q_wl), " RL=", hx4(q_rl), " LT=", hx4(q_lt),
         " GL=", hx4(q_gl), " TO=", hx4(q_to), " RJ=", hx4(q_rj), " VF=", hx4(q_vf),
-        " SE=", hxd({3'b0, q_se}), " TL=", hxd({3'b0, q_tl}), 8'h0D, 8'h0A };
+        " SE=", hxd({3'b0, q_se}), " TL=", hxd({3'b0, q_tl}),
+        " AL=", hx4(q_al), " AU=", hx4(q_au), 8'h0D, 8'h0A };
     reg [7:0] di=0, dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0;
     wire [7:0] dlb = dmsg[8*(DBGLEN-1-di) +: 8];
     always @(posedge clk) begin
