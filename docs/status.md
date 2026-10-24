@@ -85,7 +85,9 @@ stops answering, button S0 resets it without reflashing.
    these pins (composite sync on HS for SCART/JAMMA), pixel clock from the dynamic PLL.
    Hardware: 40-pin 0.5 mm FPC -> 2.54 mm breakout (pinout to confirm on the Dock
    schematic / Sipeed screen datasheet), a resistor DAC per channel for 0.7 Vpp into 75 ohm,
-   ideally a video buffer amp, or an ADV7123/ADV7125 module.
+   ideally a video buffer amp, or an ADV7123/ADV7125 module. Ready-made option noted by the
+   user: the ALIENTEK **ATK-RGB2VGA** module (RGB LCD FPC -> VGA) - check that its FPC
+   pinout matches the Dock's and how many bits per colour it takes before buying.
 
 ## Parked
 
