@@ -55,7 +55,16 @@ stops answering, button S0 resets it without reflashing.
    always reports `fpga frame=0`).
 3. **Isolated short frames**: ~1 frame in 2000-3600 with a few lines missing mid-stream
    (invisible; likely one lost pixel datagram). Not investigated.
-4. **HDMI audio**: add an open HDMI encoder (data islands) **next to** the Gowin DVI_TX,
+4. **Toward a 15 kHz CRT** (user, 2026-10-24): the output is 720p today. Native modes need
+   the dynamic geometry on gwline (CMD_SWITCHRES -> modeline + PLL; `groovy_switchres`,
+   `groovy_pll_solver`, `superres_factor.v` exist). Open question: do the HDMI->VGA
+   converters accept a low pixel clock (~6.7 MHz for 320x240 @ 15 kHz)? If they need the
+   ~25 MHz HDMI minimum, replicate pixels horizontally (super-resolution: same line and
+   frame rates, the CRT sees no difference). Test on the user's real converter.
+5. **Interlaced modes** still to validate: SWITCHRES `interlace` flag and the BLIT `field`
+   byte are decoded by the parser but not used; the ring and the raster must handle two
+   half-height fields (odd/even lines, half-line offset between fields).
+6. **HDMI audio**: add an open HDMI encoder (data islands) **next to** the Gowin DVI_TX,
    both kept and selectable; then advertise/select the audio output (HDMI or jack, with a
    default) in protocol v2 (planned in `docs/protocol_v2_features.md`).
 
