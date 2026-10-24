@@ -63,7 +63,10 @@ stops answering, button S0 resets it without reflashing.
    frame rates, the CRT sees no difference). Test on the user's real converter.
 5. **Interlaced modes** still to validate: SWITCHRES `interlace` flag and the BLIT `field`
    byte are decoded by the parser but not used; the ring and the raster must handle two
-   half-height fields (odd/even lines, half-line offset between fields).
+   half-height fields (odd/even lines, half-line offset between fields). Many HDMI->VGA
+   converters reject or deinterlace interlaced input; the analog RGB path (item 10) has no
+   such issue: the CRT gets exactly our syncs (field toggle + half-line VSYNC shift, mirrored
+   in the composite sync), at modest clocks (640x480i ~12-13.5 MHz).
 6. **Clear the line ring when the stream stops**: if no line arrives for more than N video
    frames (N to define), blank the ring. Today the last ring lap stays on screen: after a
    stream ends the UART shows `GL=0060` = 96 output lines (32 source lines) still valid.
@@ -76,7 +79,8 @@ stops answering, button S0 resets it without reflashing.
 9. *(low priority)* **Adjustable audio latency**: if an HDMI->VGA converter adds video lag,
    delay the sound to match. The audio buffer can do it: a configurable pre-roll / fixed
    delay in samples (build parameter first, then maybe a v2 protocol setting).
-10. **Analog RGB out through the Dock's RGB LCD connector** (user idea, 2026-10-24): a
+10. **Analog RGB out through the Dock's RGB LCD connector** (user idea, 2026-10-24; parallel
+   LVCMOS RGB, not LVDS): a
    native-clock path to the CRT with no HDMI 25 MHz floor and no converter lag. The
    connector carries RGB565 + HS/VS/DE + pixel clock in LVCMOS 3.3 V: R L9 N8 N9 N7 N6,
    G D11 A11 B11 P7 R7 D10, B B12 C12 B13 A14 B14, DCLK R9, HS A15, VS D14, DE E15 (Sipeed
