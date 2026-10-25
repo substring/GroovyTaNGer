@@ -12,7 +12,13 @@
 // retunes the pixel clock for super-res modes.
 `default_nettype none
 
-module rpll_tmds (
+module rpll_tmds #(
+    // CLKOUT = 27 * (FBDIV_SEL+1) / (IDIV_SEL+1); VCO = CLKOUT * ODIV_SEL (500..1250 MHz).
+    // Defaults: 720p serial 371.25 MHz. 640x480@60: IDIV 2, FBDIV 13, ODIV 8 -> 126 MHz.
+    parameter integer IDIV_SEL  = 3,
+    parameter integer FBDIV_SEL = 54,
+    parameter integer ODIV_SEL  = 2
+) (
     input  wire clkin,     // 27 MHz
     output wire clkout,    // 371.25 MHz serial clock
     output wire lock
@@ -29,11 +35,11 @@ module rpll_tmds (
     );
     defparam rpll_inst.FCLKIN          = "27";
     defparam rpll_inst.DYN_IDIV_SEL    = "false";
-    defparam rpll_inst.IDIV_SEL        = 3;       // /4
+    defparam rpll_inst.IDIV_SEL        = IDIV_SEL;
     defparam rpll_inst.DYN_FBDIV_SEL   = "false";
-    defparam rpll_inst.FBDIV_SEL       = 54;      // x55
+    defparam rpll_inst.FBDIV_SEL       = FBDIV_SEL;
     defparam rpll_inst.DYN_ODIV_SEL    = "false";
-    defparam rpll_inst.ODIV_SEL        = 2;
+    defparam rpll_inst.ODIV_SEL        = ODIV_SEL;
     defparam rpll_inst.PSDA_SEL        = "0000";
     defparam rpll_inst.DYN_DA_EN       = "true";
     defparam rpll_inst.DUTYDA_SEL      = "1000";

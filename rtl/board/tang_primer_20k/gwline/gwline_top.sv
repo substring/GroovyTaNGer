@@ -46,9 +46,25 @@ module gwline_top (
     localparam [15:0] OUR_PORT = 16'd32100;
 
     // ====================== geometry ===================================
+    // VIDEO_MODE 0: 1280x720@60 (CEA, 74.25 MHz, 4x3 scaling) - the default, HDMI screens.
+    // VIDEO_MODE 1: 640x480@60 (VESA, 25.2 MHz, exact 2x2 scaling, negative syncs) - the
+    //   mode every VGA monitor accepts, for HDMI->VGA converters (720p is a TV mode that
+    //   many VGA monitors reject as "mode not supported"). Host: blitrace --vtotal 525
+    //   --vactive 480.
+    localparam integer VIDEO_MODE = 0;
     localparam [15:0] SRC_W = 16'd320, SRC_H = 16'd240;
-    localparam [15:0] OUT_W = 16'd1280, OUT_H = 16'd720;
-    localparam integer HREP = 4, VREP = 3, HSH = 2;
+    localparam [15:0] OUT_W = (VIDEO_MODE == 1) ? 16'd640 : 16'd1280;
+    localparam [15:0] OUT_H = (VIDEO_MODE == 1) ? 16'd480 : 16'd720;
+    localparam integer HREP = (VIDEO_MODE == 1) ? 2 : 4;
+    localparam integer VREP = (VIDEO_MODE == 1) ? 2 : 3;
+    localparam integer HSH  = (VIDEO_MODE == 1) ? 1 : 2;
+    localparam [15:0] H_TOTAL = (VIDEO_MODE == 1) ? 16'd800 : 16'd1650;
+    localparam [15:0] H_SYNC0 = (VIDEO_MODE == 1) ? 16'd656 : 16'd1390;
+    localparam [15:0] H_SYNC1 = (VIDEO_MODE == 1) ? 16'd752 : 16'd1430;
+    localparam [15:0] V_TOTAL = (VIDEO_MODE == 1) ? 16'd525 : 16'd750;
+    localparam [15:0] V_SYNC0 = (VIDEO_MODE == 1) ? 16'd490 : 16'd725;
+    localparam [15:0] V_SYNC1 = (VIDEO_MODE == 1) ? 16'd492 : 16'd730;
+    localparam        SYNC_POS = (VIDEO_MODE == 1) ? 1'b0 : 1'b1;
     localparam integer NATIVE_PIX = 320*240;
     localparam integer FB_ADDR_W  = 17;
 
@@ -251,7 +267,10 @@ module gwline_top (
     // PIXEL CLOCK (720p) - the only PLL now (no DDR3 clocks)
     // =========================================================================
     wire serial_clk, tmds_lock, pix_clk;
-    rpll_tmds u_tmdspll (.clkin(clk), .clkout(serial_clk), .lock(tmds_lock));
+    rpll_tmds #(.IDIV_SEL ((VIDEO_MODE == 1) ? 2  : 3),
+                .FBDIV_SEL((VIDEO_MODE == 1) ? 13 : 54),
+                .ODIV_SEL ((VIDEO_MODE == 1) ? 8  : 2))
+        u_tmdspll (.clkin(clk), .clkout(serial_clk), .lock(tmds_lock));
     wire hdmi_rst_n = rst & tmds_lock;
     CLKDIV u_div (.RESETN(hdmi_rst_n), .HCLKIN(serial_clk), .CLKOUT(pix_clk), .CALIB(1'b1));
     defparam u_div.DIV_MODE = "5";
@@ -265,9 +284,9 @@ module gwline_top (
     wire [15:0] hcount, vcount;
     video_timing_gen u_timing (
         .clk(pix_clk), .rst(~hdmi_rst_n), .en(1'b1),
-        .h_total(16'd1650), .h_active(OUT_W), .h_sync_begin(16'd1390), .h_sync_end(16'd1430),
-        .v_total(16'd750),  .v_active(OUT_H), .v_sync_begin(16'd725),  .v_sync_end(16'd730),
-        .h_sync_pos(1'b1), .v_sync_pos(1'b1),
+        .h_total(H_TOTAL), .h_active(OUT_W), .h_sync_begin(H_SYNC0), .h_sync_end(H_SYNC1),
+        .v_total(V_TOTAL), .v_active(OUT_H), .v_sync_begin(V_SYNC0), .v_sync_end(V_SYNC1),
+        .h_sync_pos(SYNC_POS), .v_sync_pos(SYNC_POS),
         .hcount(hcount), .vcount(vcount),
         .hsync(hsync), .vsync(vsync), .de(de),
         .line_start(line_start), .frame_start(frame_start));

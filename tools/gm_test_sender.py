@@ -441,8 +441,9 @@ class BeaconClock:
     KERNEL receive timestamp (SO_TIMESTAMPNS), not from when this script gets round to
     reading the socket - blitrace busy-spins for a whole frame between reads. Kernel
     timestamps are CLOCK_REALTIME; they are mapped onto perf_counter once at start."""
-    def __init__(self, sock, raster_lines, raster_line, latency):
+    def __init__(self, sock, raster_lines, raster_line, latency, full_gl=720):
         self.sock, self.raster_lines, self.raster_line, self.latency = sock, raster_lines, raster_line, latency
+        self.full_gl = full_gl                 # output lines of a complete picture (vactive)
         sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
         self.rt_to_pc = time.perf_counter() - time.time()
         self.last_vsync = None                 # perf_counter of the vsync after the last beacon
@@ -472,7 +473,7 @@ class BeaconClock:
                 self.last_seq = seq
                 self.n += 1
                 self.gl_min = gl if self.gl_min is None else min(self.gl_min, gl)
-                self.gl_bad += (gl != 720)
+                self.gl_bad += (gl != self.full_gl)
                 self.lt.append(lt)
                 self.gl.append(gl)
                 # built at raster line `line`, ~latency ago: next line 0 comes
@@ -489,9 +490,9 @@ class BeaconClock:
             # LT over time, 10 evenly spaced samples: shows a drift or a jump at a glance
             step = len(lt) // 10
             print("LT over the stream:", " ".join(str(lt[i]) for i in range(0, len(lt), step)))
-            bad = [i for i, g in enumerate(self.gl) if g != 720]
-            print("beacons with GL!=720 (index of", len(self.gl), "):", bad[:20])
-        return (f"beacons: {self.n} received, {self.lost} lost; frames with GL!=720: {self.gl_bad} "
+            bad = [i for i, g in enumerate(self.gl) if g != self.full_gl]
+            print(f"beacons with GL!={self.full_gl} (index of", len(self.gl), "):", bad[:20])
+        return (f"beacons: {self.n} received, {self.lost} lost; frames with GL!={self.full_gl}: {self.gl_bad} "
                 f"(min GL {self.gl_min}); LT {min(lt) if lt else '-'}..{max(lt) if lt else '-'}")
 
 
@@ -590,7 +591,7 @@ def send_blitrace(sock, addr, args):
     bclk = None
     if args.beacon:
         # PUSHED phase reference: enable the FPGA beacon and lock on the first one
-        bclk = BeaconClock(sock, raster_lines, raster_line, args.beacon_latency)
+        bclk = BeaconClock(sock, raster_lines, raster_line, args.beacon_latency, args.vactive)
         sock.sendto(bytes([CMD_SET_BEACON, 1]), addr)
         t_end = time.perf_counter() + 0.5
         while bclk.last_vsync is None and time.perf_counter() < t_end:
