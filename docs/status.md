@@ -92,6 +92,13 @@ stops answering, button S0 resets it without reflashing.
    ideally a video buffer amp, or an ADV7123/ADV7125 module. Ready-made option noted by the
    user: the ALIENTEK **ATK-RGB2VGA** module (RGB LCD FPC -> VGA) - check that its FPC
    pinout matches the Dock's and how many bits per colour it takes before buying.
+   Modeline limits on this path: none from the connector itself (plain I/O: any porches,
+   sync widths, polarities, interlace). Real ones: (a) pixel-clock precision - the integer
+   rPLL from 27 MHz cannot hit every clock exactly (refresh e.g. 59.94 instead of 60.00,
+   matters for GroovyMAME sync; fractional-N later), low clocks are fine; (b) the ring's
+   line slots are 512 source pixels (arcade widths go to ~768: wider slots = more BSRAM);
+   (c) the electronics after the FPC (an active module may limit bandwidth or expect LCD
+   timings) and the monitor's own H/V ranges.
 11. *(option)* **RGB888 end to end**: today the whole path is RGB565 (`blit_rx` packs the
    host's RGB888 to 565 to fit the ring), and the Dock's RGB LCD connector only wires 5/6/5
    data lines, so it can never output more than 565. 888 would need (a) a 24-bit ring (about
