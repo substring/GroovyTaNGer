@@ -54,7 +54,7 @@ module gwline_top_e2e_tb;
     endfunction
 
     // ------------------------------------------------------------ stream from file
-    reg [7:0]  sbytes [0:800_000-1];
+    reg [7:0]  sbytes [0:1_200_000-1];
     reg [63:0] sidx   [0:1023];
     integer nframes_eth = 0, nf_net = 0;
     string dir = ".";

@@ -69,7 +69,9 @@ module groovy_linewr #(
             col <= 16'd0; line <= 16'd0; write_line <= 16'd0;
             frame_base <= slot;
         end else if (px_we) begin
-            we     <= 1'b1;
+            // a slot holds 2^COL_W columns: pixels beyond that (lines wider than the
+            // slot) are dropped instead of wrapping onto the start of the line
+            we     <= (col < (16'd1 << COL_W));
             w_slot <= slot;
             w_col  <= col[COL_W-1:0];
             w_data <= px_data;

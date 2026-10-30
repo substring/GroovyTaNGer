@@ -21,6 +21,8 @@
 #                               N stereo 16-bit samples per frame, after its pixels; CMD_INIT
 #                               then announces 48 kHz stereo). Sample k of the stream:
 #                               L = 2k, R = 2k + 1 (mod 65536), checked by the testbench.
+#                           8 = CMD_SWITCHRES (--groovymame: right after CMD_INIT,
+#                               h_active x v_active = --width x --height)
 #                           4 = CMD_GET_STATUS (--status-burst N: N of them after each
 #                               frame's last pixel datagram, back to back)
 #
@@ -60,14 +62,24 @@ def main():
                    help="stereo samples per frame (48 kHz: 800); 0 = no audio")
     p.add_argument("--groovymame", action="store_true",
                    help="GroovyMAME dialect: 4-byte INIT (RGB888), CMD_BLIT_VSYNC 6, 1472-byte chunks")
+    p.add_argument("--rgb565", action="store_true",
+                   help="with --groovymame: GroovyMAME patched with -mister_rgb_mode rgb565 "
+                        "(patches/groovymame-mister-rgb565.patch): 5-byte INIT, 2-byte pixels")
     p.add_argument("--status-burst", dest="status_burst", type=int, default=0,
                    help="CMD_GET_STATUS requests sent back to back after each frame")
     a = p.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
 
     rate = 3 if a.audio else 0
-    init = bytes([2, 0, rate, 2]) if a.groovymame else cmd_init(sound_rate=rate, sound_chan=2)
+    if a.groovymame:
+        init = bytes([2, 0, rate, 2, 2]) if a.rgb565 else bytes([2, 0, rate, 2])
+    else:
+        init = cmd_init(sound_rate=rate, sound_chan=2)
     frames = [(5, build_arp_request()), (0, build_udp_frame(init))]
+    if a.groovymame:   # GroovyMAME sends the game's modeline before its first blit
+        w, h = a.width, a.height
+        frames.append((8, build_udp_frame(struct.pack("<BdHHHHHHHHB", 3, 6.7,
+                       w, w + 16, w + 48, w + 104, h, h + 3, h + 6, 262, 0))))
     k_audio = 0
     if a.beacon:
         frames.append((3, build_udp_frame(bytes([11, 1]))))   # CMD_SET_BEACON, enable
@@ -78,7 +90,10 @@ def main():
             for l in range(a.height):
                 for c in range(a.width):
                     v = pix(f, l, c)
-                    raw += bytes([(v & 0x1F) << 3, ((v >> 5) & 0x3F) << 2, (v >> 11) << 3])
+                    if a.rgb565:
+                        raw += struct.pack("<H", v)
+                    else:
+                        raw += bytes([(v & 0x1F) << 3, ((v >> 5) & 0x3F) << 2, (v >> 11) << 3])
             for o in range(0, len(raw), 1472):
                 frames.append((2, build_udp_frame(bytes(raw[o:o + 1472]))))
         else:

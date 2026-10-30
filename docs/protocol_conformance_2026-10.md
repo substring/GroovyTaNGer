@@ -127,6 +127,31 @@ New findings while testing:
 the default and keeps the 4-byte INIT). Applies to the user's fork 4ce01b9, compiles; not
 yet run against the board.
 
+## #6 first step + a new blocker (2026-10-30, sim)
+
+`gwline_top.sv` now takes the frame size and line width from CMD_SWITCHRES (h_active x
+v_active, 320x240 until one arrives); `groovy_linewr.v` drops columns beyond a slot instead
+of wrapping. e2e bench, GroovyMAME dialect with SWITCHRES: 384x240 and 320x224 frames are
+decoded pixel-exact (RGB888 and RGB565), every ACK correct.
+
+**New blocker, GroovyMAME's unpaced burst vs the 32-line ring.** GroovyMAME sends a whole
+frame at wire speed, starting at its vsync scanline (`fd 9.1` on the user's run = line ~238
+of 262, i.e. ~24 lines before the raster's top). In RGB565 a 320-px line takes 53 us on the
+wire against 63.6 us per raster line (15 kHz; 66.7 us in the 720p bench), so the writer
+GAINS ~0.17-0.2 line per line: ~40-47 lines over a frame, more than the 32-line ring. The
+writer never waits, so it overwrites lines the raster has not shown yet. Bench: 320x224
+RGB565 shows only ~41 of 224 source lines exact, 384x240 RGB565 ~217 of 240 (wider lines
+take longer on the wire). Raw RGB888 has the opposite problem (writer too slow, #5). Our
+own `blitrace` paces lines to the raster, which is why it never hit this.
+
+Ways out (to decide):
+- **writer back-pressure**: when the ring is full, stall instead of overwriting; the bytes
+  wait in udp.sv's 8 KB RX FIFO (~12 lines of 640 B). 32 + 12 ~ 44 lines: borderline for
+  320-wide RGB565, depends on the start line;
+- **more ring lines**: 384-column slots instead of 512 would give ~64 lines for about +7
+  BSRAM (33/46 used today), at the cost of widths > 384;
+- **client pacing**: spread the datagrams over the frame in GroovyMAME (another patch).
+
 ## Fix order proposed
 
 1. CMD_BLIT_VSYNC (6) in the parser (7/11 bytes; cSize only when INIT asked for LZ4).

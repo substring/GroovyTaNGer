@@ -73,7 +73,6 @@ module gwline_top (
     localparam [15:0] V_SYNC0 = (VIDEO_MODE >= 2) ? 16'd243 : (VIDEO_MODE == 1) ? 16'd490 : 16'd725;
     localparam [15:0] V_SYNC1 = (VIDEO_MODE >= 2) ? 16'd246 : (VIDEO_MODE == 1) ? 16'd492 : 16'd730;
     localparam        SYNC_POS = (VIDEO_MODE == 0) ? 1'b1 : 1'b0;
-    localparam integer NATIVE_PIX = 320*240;
     localparam integer FB_ADDR_W  = 17;
 
     // ---- line ring sizing ----
@@ -254,10 +253,24 @@ module gwline_top (
     wire                  fb_we, frame_done;
     wire [FB_ADDR_W-1:0]  fb_waddr;   // (unused: the ring keeps its own line/col)
     wire [15:0]           fb_wdata;
-    // register bytes_len (a NATIVE_PIX*cfg_bpp product) so it presents a STABLE value
-    // to blit_rx's byte-count compare instead of a fresh multiply on the clk50m path.
+    // SOURCE GEOMETRY from CMD_SWITCHRES (h_active x v_active), 320x240 until the host
+    // sends one. Every game has its own size (GroovyMAME sends the switchres modeline
+    // before its first blit), and a blit carries exactly width * height * bytes-per-pixel
+    // bytes: with a fixed 320x240 a 320x224 or 384x240 game made blit_rx wait for bytes
+    // that never come and swallow the next frame. The raster is still fixed (VIDEO_MODE):
+    // a shorter picture leaves black lines at the bottom, a wider one is cut at the right
+    // (and beyond LINE_W columns per slot, see groovy_linewr).
+    logic [15:0] src_w = SRC_W, src_h = SRC_H;
+    always_ff @(posedge clk50m)
+        if (core_rst) begin
+            src_w <= SRC_W;  src_h <= SRC_H;
+        end else if (switchres_valid && sr_ha != 16'd0 && sr_va != 16'd0) begin
+            src_w <= sr_ha;  src_h <= sr_va;
+        end
+    // registered so blit_rx's byte-count compare sees a stable value, not a fresh
+    // multiply on the clk50m path
     logic [31:0]          bytes_len;
-    always_ff @(posedge clk50m) bytes_len <= NATIVE_PIX * cfg_bpp;
+    always_ff @(posedge clk50m) bytes_len <= src_w * src_h * cfg_bpp;
     wire blit_timed_out;
     // TIMEOUT_CYCLES = 8ms @ 50MHz. The default (1ms) was too tight: a plain sleep()-paced
     // test sender's OWN scheduler jitter occasionally exceeded 1ms between lines, which
@@ -311,7 +324,7 @@ module gwline_top (
     groovy_linering #(.NLINES(NLINES), .LINE_W(LINE_W), .DATA_W(16),
                       .H_SH(HSH), .V_REPL(VREP), .BAD_COLOR(16'h0000)) u_linering (
         .wr_clk(clk50m), .wr_rst(video_rst), .frame_start(blit_valid),
-        .px_we(fb_we), .px_data(fb_wdata), .native_w(SRC_W),
+        .px_we(fb_we), .px_data(fb_wdata), .native_w(src_w),
         .write_line(write_line), .src_line_wr(src_line_wr), .lead_top(lead_top),
         .pix_clk(pix_clk), .pix_rst(~hdmi_rst_n),
         .hcount(hcount), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
@@ -330,7 +343,9 @@ module gwline_top (
         gl_s1 <= good_lines;  gl_s2 <= gl_s1;
         if (gl_s1 == gl_s2) gl_50 <= gl_s2;
     end
-    wire picture_ok = (gl_50 == OUT_H[9:0]);       // every output line of the last frame valid
+    // every output line the source covers was valid in the last video frame
+    wire [15:0] src_out_h = (src_h * VREP > OUT_H) ? OUT_H : src_h * VREP;
+    wire picture_ok = (gl_50 == src_out_h[9:0]);
     // Beacon status bit0: picture NOT complete; bit6: audio playing.
     assign beamrace_status = {1'b0, a_playing, 5'd0, ~picture_ok};
     // ACK status bit6 is Groovy_MiSTer's FPGA_AUDIO = "this receiver has an audio output
