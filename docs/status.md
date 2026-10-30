@@ -55,6 +55,11 @@ stops answering, button S0 resets it without reflashing.
    dialect (CMD_BLIT_VSYNC 6, RGB888 only) that gwline rejects; ACK frame counter = 0 and
    audio bit semantics block a stock client; raw RGB888 does not fit 100 Mbit for most
    modes (decision: RGB565 client patch and/or LZ4). Fix order in that document.
+   Done since (sim only): CMD 6, ACK frame counter / vCount / audio bit, RGB888 B,G,R
+   order, frame size from SWITCHRES. Client side: `patches/groovymame-mister-rgb565.patch`
+   and `patches/groovymame-mister-pacing.patch` (kernel pacing via the fq qdisc, so the
+   RGB565 burst does not overflow the 32-line ring), all in `docs/groovymame_client.md`,
+   including the frame-delay constraint (fd >= ~8.9 for a 262-line mode).
 3. **Isolated short frames**: ~1 frame in 2000-3600 with a few lines missing mid-stream
    (invisible; likely one lost pixel datagram). Not investigated.
 4. **Toward a 15 kHz CRT** (user, 2026-10-24): the output is 720p today. Native modes need
