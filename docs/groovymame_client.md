@@ -170,3 +170,19 @@ PC**: Groovy_MiSTer sends the MiSTer's joysticks/keyboard to the host (the proto
 input packets), but the Tang Primer 20K Dock has no USB host port for pads. Possible
 later alternative: arcade controls (buttons/sticks or a JAMMA harness) wired to free Dock
 pins and sent as protocol input packets.
+
+**Correction (user, same evening): that run was WITHOUT `-mister_pacing`, and it looked
+fine.** Not a contradiction: Switchres picked a 384x240 mode, and a 384-px RGB565 line
+takes 64.2 us on the wire, i.e. the 15 kHz raster's 63.6 us almost exactly - the burst is
+naturally paced (the writer even loses ~2 lines over a frame). The simulation showed an
+overflow for 384 because the bench raster is 720p (66.7 us per source line). Narrower
+modes are where pacing matters, on the 15 kHz raster too:
+
+| Width (RGB565) | Wire time / line | Writer gain over 240 lines (15 kHz) |
+|---|---|---|
+| 256 | 42.8 us | ~79 lines: overflows the 32-line ring |
+| 320 | 53.5 us | ~38 lines: overflows |
+| 384 | 64.2 us | ~-2 lines: fine without pacing |
+
+To check on the hardware: a 256- or 320-wide mode without `-mister_pacing` (expect
+glitches in the lower part of the picture), then with it.
