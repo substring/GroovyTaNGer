@@ -51,8 +51,10 @@ stops answering, button S0 resets it without reflashing.
    at the raster rate (27 MHz crystal): over long sessions the buffer will slowly fill or
    drain. Needs rate adaptation (or reporting the level so the host adapts). Not done.
 2. **Conformance with the original Groovy_MiSTer protocol** before plugging GroovyMAME in:
-   re-check `docs/protocol_verified.md` against what the FPGA does now (known gap: the ACK
-   always reports `fpga frame=0`).
+   audited 2026-10-30, see `docs/protocol_conformance_2026-10.md`. GroovyMAME speaks its own
+   dialect (CMD_BLIT_VSYNC 6, RGB888 only) that gwline rejects; ACK frame counter = 0 and
+   audio bit semantics block a stock client; raw RGB888 does not fit 100 Mbit for most
+   modes (decision: RGB565 client patch and/or LZ4). Fix order in that document.
 3. **Isolated short frames**: ~1 frame in 2000-3600 with a few lines missing mid-stream
    (invisible; likely one lost pixel datagram). Not investigated.
 4. **Toward a 15 kHz CRT** (user, 2026-10-24): the output is 720p today. Native modes need
