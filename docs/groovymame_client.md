@@ -118,3 +118,13 @@ timed out on the one frame where it waited (16 ms, no matching ACK); otherwise e
 took ~17.2 ms (> 16.7) so it never waited. Switchres created 384x240 and 307x192 modes.
 Next: the new mode-3 bitstream `impl/variants/gwline_mode3_240p_15k_x4_27mhz_gm.fs` (also
 on g4ge:~/groovy_tang/), which has the conformance fixes and the SWITCHRES frame size.
+
+## First picture from GroovyMAME (2026-10-30)
+
+Same run after flashing `gwline_mode3_240p_15k_x4_27mhz_gm.fs` on g4ge (GET_STATUS from
+the PC: status 0x41, bit 6 = 1): **GroovyMAME's Sonic 2 shows on the 15 kHz CRT** through
+the HDMI->VGA converter (user: "ça marche !"). Patches applied in the fork: rgb565 and
+pacing. Known defect: the picture is shifted, because the FPGA raster still uses its own
+fixed mode-3 timings (1716 x 262 at 27 MHz, syncs at 1360/243) and ignores the porches
+and totals of the CMD_SWITCHRES modeline (only its active size is used). Next: drive the
+raster from the modeline (open item 4).
