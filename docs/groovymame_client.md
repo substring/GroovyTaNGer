@@ -5,6 +5,33 @@ What it takes to run the real GroovyMAME client (`-video mister`, its own nogpu 
 Primer 20K Dock's 100 Mbit Ethernet. Protocol conformance itself is in
 `docs/protocol_conformance_2026-10.md`.
 
+## Setup recap: the three "hacks" that make it work (2026-10-30, HW-confirmed on the CRT)
+
+Everything below is needed together; each one is explained further down.
+
+1. **RGB565 from GroovyMAME** - `patches/groovymame-mister-rgb565.patch`, option
+   `-mister_rgb_mode rgb565`. Raw RGB888 does not fit 100 Mbit; RGB565 does.
+2. **Kernel pacing in GroovyMAME** - `patches/groovymame-mister-pacing.patch` (apply after
+   the rgb565 one), option `-mister_pacing 1.0`. Spreads each frame over the raster time
+   instead of a wire-speed burst that overflows the FPGA's 32-line ring; the emulation
+   thread does not wait.
+3. **The `fq` qdisc on the sending interface** (root, not persistent), without which
+   `-mister_pacing` silently does nothing:
+   ```bash
+   tc qdisc replace dev <interface> root fq flow_limit 1000
+   ```
+   `<interface>`: `eno1` on g4ge, `enp6s0` on the 5800X. `flow_limit 1000` is mandatory
+   (the default 100 drops the tail of every frame). Back to normal:
+   `tc qdisc replace dev <interface> root fq_codel`.
+
+Plus, on the FPGA side, a bitstream with the conformance fixes (commit 0f317be or later;
+`GET_STATUS` status bit 6 = 1 proves it) and, for the CRT, VIDEO_MODE 3
+(`impl/variants/gwline_mode3_240p_15k_x4_27mhz_gm.fs`). And the PC's address on the
+board's subnet (`ip addr add 192.168.15.15/24 dev <interface>`, root).
+
+Constraint to remember: GroovyMAME's frame delay must stay >= ~8.9 (262-line modes) for
+the 32-line ring - see "The real constraint" below.
+
 ## Command line
 
 ```bash
@@ -136,3 +163,10 @@ drift (status item 1), or the PT8211 itself (a non-oversampling DAC with no reco
 filter: images above Nyquist sound harsh on treble; the earlier idle hiss already showed
 the analog stage needs filtering). **Interlaced modes do not work at all** - expected,
 interlace is not implemented yet (status item 5).
+
+More feedback from the user on the same run: centring wrong (known: fixed raster
+timings). **Input lag** still to measure. **Inputs cannot go back from the board to the
+PC**: Groovy_MiSTer sends the MiSTer's joysticks/keyboard to the host (the protocol's
+input packets), but the Tang Primer 20K Dock has no USB host port for pads. Possible
+later alternative: arcade controls (buttons/sticks or a JAMMA harness) wired to free Dock
+pins and sent as protocol input packets.

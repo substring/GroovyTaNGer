@@ -142,6 +142,13 @@ stops answering, button S0 resets it without reflashing.
 2. **Interlace** (item 5): does not work at all with GroovyMAME.
 3. **Audio crackle in the treble** with GroovyMAME: read `AU=`/`AL=` on the UART (g4ge)
    during a run first; see `docs/groovymame_client.md`.
+4. **Input lag**: to measure (user).
+5. **Inputs from the board to the PC**: not possible as on MiSTer - the Dock has no USB
+   host for pads. Note for users; possible alternative = arcade controls / JAMMA wired to
+   free Dock pins, sent as protocol input packets.
+
+How to set up a GroovyMAME run (rgb565 + pacing patches, fq qdisc): the recap at the top
+of `docs/groovymame_client.md`.
 
 ## Parked
 

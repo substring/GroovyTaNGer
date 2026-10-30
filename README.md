@@ -11,6 +11,8 @@ architecture (this is the living reference document — read it first).
 **Current state and resume point: [docs/status.md](docs/status.md)** (beam-race video over
 the network works on the board). The table below is the original bootstrap inventory.
 
+**Running GroovyMAME against the board (patches, fq qdisc, pacing): [docs/groovymame_client.md](docs/groovymame_client.md).**
+
 Early bootstrap. The repository currently contains:
 
 - The 4-layer RTL skeleton from spec §6.2 (`vendor` / `board` / `core` / `generic`).
