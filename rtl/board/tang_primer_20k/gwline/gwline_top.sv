@@ -267,8 +267,7 @@ module gwline_top (
         end else if (switchres_valid && sr_ha != 16'd0 && sr_va != 16'd0) begin
             src_w <= sr_ha;  src_h <= sr_va;
         end
-    // registered so blit_rx's byte-count compare sees a stable value, not a fresh
-    // multiply on the clk50m path
+    // registered: blit_rx latches it at each CMD_BLIT header
     logic [31:0]          bytes_len;
     always_ff @(posedge clk50m) bytes_len <= src_w * src_h * cfg_bpp;
     wire blit_timed_out;

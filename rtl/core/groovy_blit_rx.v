@@ -61,6 +61,11 @@ module groovy_blit_rx #(
     end
     endfunction
 
+    // bytes still expected, counted down: the end test compares against a constant
+    // instead of a 32-bit add + compare against bytes_len (that carry chain from the
+    // frame-size multiplier missed 50 MHz once the size came from CMD_SWITCHRES)
+    reg [31:0] remain;
+
     always @(posedge clk) begin
         wr_en      <= 1'b0;
         frame_done <= 1'b0;
@@ -70,9 +75,10 @@ module groovy_blit_rx #(
             idle_cnt<=32'd0;
         end else if (start) begin
             blitting<=1'b1; bytes_recv<=32'd0; bcnt<=2'd0; pix_idx<={ADDR_W{1'b0}};
-            idle_cnt<=32'd0;
+            idle_cnt<=32'd0; remain<=bytes_len;
         end else if (blitting && in_valid) begin
             bytes_recv <= bytes_recv + 32'd1;
+            remain     <= remain - 32'd1;
             idle_cnt   <= 32'd0;                     // byte arrived: reset the watchdog
 
             // gather bytes into a pixel
@@ -91,7 +97,7 @@ module groovy_blit_rx #(
             end
 
             // end of frame (count includes this byte)
-            if (bytes_recv + 32'd1 >= bytes_len) begin
+            if (remain[31:1] == 31'd0) begin        // remain <= 1: this was the last byte
                 blitting   <= 1'b0;
                 frame_done <= 1'b1;
             end
