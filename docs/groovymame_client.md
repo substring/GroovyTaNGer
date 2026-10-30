@@ -128,3 +128,11 @@ pacing. Known defect: the picture is shifted, because the FPGA raster still uses
 fixed mode-3 timings (1716 x 262 at 27 MHz, syncs at 1360/243) and ignores the porches
 and totals of the CMD_SWITCHRES modeline (only its active size is used). Next: drive the
 raster from the modeline (open item 4).
+
+User feedback on that run: **picture quality good** (apart from the shift). **Audio
+crackles a little in the treble** - not investigated; leads: underruns / buffer level
+(UART `AU=` / `AL=`, not read during the run: the UART is on g4ge), the PC-vs-FPGA clock
+drift (status item 1), or the PT8211 itself (a non-oversampling DAC with no reconstruction
+filter: images above Nyquist sound harsh on treble; the earlier idle hiss already showed
+the analog stage needs filtering). **Interlaced modes do not work at all** - expected,
+interlace is not implemented yet (status item 5).

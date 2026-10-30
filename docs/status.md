@@ -134,6 +134,15 @@ stops answering, button S0 resets it without reflashing.
    board over the UART before using them. These pins sit on the DDR3's 1.5 V bank: declare them
    LVCMOS15. Needs a ~10 ms debounce. Later: a small OSD menu driven by the buttons.
 
+## Next session (from the first GroovyMAME run on the CRT, 2026-10-30)
+
+1. **Raster timings + pixel clock from the SWITCHRES modeline** (item 4): the picture is
+   shifted because the raster keeps the fixed mode-3 timings; target = modeline porches
+   and totals at pclk x N (super-resolution, N so that pclk x N >= ~25 MHz), dynamic PLL.
+2. **Interlace** (item 5): does not work at all with GroovyMAME.
+3. **Audio crackle in the treble** with GroovyMAME: read `AU=`/`AL=` on the UART (g4ge)
+   during a run first; see `docs/groovymame_client.md`.
+
 ## Parked
 
 **DDR3 full-frame path (`gwddr3net`)**: the network -> DDR3 -> HDMI path is bit-exact (port
