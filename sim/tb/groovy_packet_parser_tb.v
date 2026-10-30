@@ -161,10 +161,39 @@ module groovy_packet_parser_tb;
                 sr_v_active, sr_v_begin, sr_v_end, sr_v_total, sr_interlace);
             errors=errors+1; end
 
-        // ---- error: deprecated CMD_BLIT_VSYNC (6) ----
+        // ---- CMD_BLIT_VSYNC (6), GroovyMAME's 11-byte raw blit: frame 0x01020304,
+        //      vsync 0x0105, cSize 0 -> raw (lz4 = 0), field 0 ----
+        send_byte(8'd6,1,0);
+        send_byte(8'h04,0,0); send_byte(8'h03,0,0); send_byte(8'h02,0,0); send_byte(8'h01,0,0);
+        send_byte(8'h05,0,0); send_byte(8'h01,0,0);
+        send_byte(8'h00,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,1);
+        @(negedge clk);
+        if (!blit_valid || bad_packet || blit_frame!==32'h01020304 || blit_vsync!==16'h0105 ||
+            blit_field!==8'd0 || blit_lz4!==1'b0 || blit_csize!==32'd0 || blit_flag!==1'b0) begin
+            $display("FAIL: CMD 6 raw: v=%b bad=%b fr=%h vs=%h fld=%0d lz4=%b cs=%0d",
+                blit_valid, bad_packet, blit_frame, blit_vsync, blit_field, blit_lz4, blit_csize);
+            errors=errors+1; end
+        // ---- CMD 6 with LZ4: cSize 0x00001234 ----
+        send_byte(8'd6,1,0);
+        send_byte(8'h09,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,0);
+        send_byte(8'h20,0,0); send_byte(8'h00,0,0);
+        send_byte(8'h34,0,0); send_byte(8'h12,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,1);
+        @(negedge clk);
+        if (!blit_valid || blit_frame!==32'd9 || blit_vsync!==16'h20 || blit_lz4!==1'b1 ||
+            blit_csize!==32'h1234) begin
+            $display("FAIL: CMD 6 lz4: fr=%0d vs=%h lz4=%b cs=%h", blit_frame, blit_vsync, blit_lz4, blit_csize);
+            errors=errors+1; end
+        // ---- CMD 6, 7-byte form (no cSize) ----
+        send_byte(8'd6,1,0);
+        send_byte(8'h0A,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,0); send_byte(8'h00,0,0);
+        send_byte(8'h30,0,0); send_byte(8'h00,0,1);
+        @(negedge clk);
+        if (!blit_valid || blit_frame!==32'd10 || blit_vsync!==16'h30 || blit_lz4!==1'b0) begin
+            $display("FAIL: CMD 6 7-byte form"); errors=errors+1; end
+        // ---- error: CMD 6 with a wrong length (1 byte) ----
         send_byte(8'd6, 1, 1);
         @(negedge clk);
-        if (!bad_packet) begin $display("FAIL: deprecated cmd 6 not flagged"); errors=errors+1; end
+        if (!bad_packet || blit_valid) begin $display("FAIL: 1-byte cmd 6 not flagged"); errors=errors+1; end
 
         // ---- CMD_INIT 4-byte form (rgbMode omitted -> RGB888) ----
         send_byte(8'd2, 1, 0);

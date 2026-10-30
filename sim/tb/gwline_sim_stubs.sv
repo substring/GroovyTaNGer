@@ -12,7 +12,10 @@ module PLL_6M (output wire clkout, output wire clkoutd, input wire clkin);
     assign clkout = c6;  assign clkoutd = c1;
 endmodule
 
-module rpll_tmds (input wire clkin, output wire clkout, output reg lock);
+// The VIDEO_MODE dividers are accepted but ignored: the bench models mode 0 (720p).
+module rpll_tmds #(parameter integer IDIV_SEL = 3, parameter integer FBDIV_SEL = 54,
+                   parameter integer ODIV_SEL = 2)
+                  (input wire clkin, output wire clkout, output reg lock);
     reg c = 0;
     always #1.3468 c = ~c;          // 371.25 MHz TMDS serial clock
     assign clkout = c;

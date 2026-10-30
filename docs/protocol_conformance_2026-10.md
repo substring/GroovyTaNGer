@@ -99,6 +99,29 @@ frame. MiSTer stores whole frames, so any start line works there; our 32-line ri
 the burst to start at most ~32 lines before the raster's top of frame. Whether the
 automatic frame delay lands there has to be measured with GroovyMAME on the board.
 
+## Fixed 2026-10-30 (sim-validated, not yet HW-tested)
+
+- **#1** `groovy_packet_parser.v` accepts CMD_BLIT_VSYNC (6), 7 or 11 bytes (lz4 = cSize != 0).
+- **#2/#3** `gwline_top.sv` `gpu_frame`: cleared by INIT/CLOSE, preset to F-1 by the first
+  blit F, +1 at every raster top of frame. vCount = raster source line when the command is
+  parsed (0 = first active line). e2e bench: GPU frame 0,1,2,3 for one blit per video frame
+  and 0,2,4 for one every other frame; vCount equal to the raster line at the header.
+- **#4** ACK status bit 6 = 1 (the jack is always available). The beacon keeps bit 6 =
+  playing.
+- **RGB888 byte order** (found on the way): the wire carries **B,G,R** (MiSTer core
+  `{r,g,b} <= word64[23:0]`, GroovyMAME copies MAME's little-endian ARGB). `groovy_blit_rx`
+  read R,G,B: red and blue were swapped. Fixed + unit test.
+- e2e bench: `gen_gwline_stream.py --groovymame` + `+GM` speak GroovyMAME's dialect (4-byte
+  INIT, CMD 6, B,G,R bytes in 1472-byte datagrams, back to back with the 96-bit Ethernet
+  IFG). Result: every frame decoded pixel-exact until the raster overtakes the RGB888
+  writer, ~111 source lines in (#5 confirmed in simulation).
+
+New findings while testing:
+- **#14 GET_STATUS bursts**: requests that arrive while an ACK is still being sent are
+  dropped (`groovy_ack_policy` ignores the trigger while `ack_busy`): 12 back-to-back
+  requests gave 3 ACKs. The reference answers every one. GroovyMAME does not burst, but a
+  queued trigger would be more faithful.
+
 ## Fix order proposed
 
 1. CMD_BLIT_VSYNC (6) in the parser (7/11 bytes; cSize only when INIT asked for LZ4).

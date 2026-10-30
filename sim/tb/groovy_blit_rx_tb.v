@@ -71,6 +71,17 @@ module groovy_blit_rx_tb;
         if (mem[0]!==16'h2211) begin $display("FAIL: 2nd px0=%04h exp 2211", mem[0]); errors=errors+1; end
         if (done_cnt !== 1)    begin $display("FAIL: 2nd frame_done=%0d exp 1", done_cnt); errors=errors+1; end
 
+        // RGB888 as GroovyMAME / the MiSTer core put it on the wire: B,G,R per pixel.
+        // pixel 0 = pure red (B=00 G=00 R=FF) -> F800; pixel 1 = B=FF G=80 R=08 -> 0C1F
+        bytes_len=6; bytespp=3'd3; nwr=0; done_cnt=0;
+        @(negedge clk); start=1; @(negedge clk); start=0;
+        feed(8'h00); feed(8'h00); feed(8'hFF);
+        feed(8'hFF); feed(8'h80); feed(8'h08);
+        @(negedge clk); @(negedge clk);
+        if (nwr !== 2)         begin $display("FAIL: RGB888 writes=%0d exp 2", nwr); errors=errors+1; end
+        if (mem[0]!==16'hF800) begin $display("FAIL: RGB888 red px0=%04h exp F800", mem[0]); errors=errors+1; end
+        if (mem[1]!==16'h0C1F) begin $display("FAIL: RGB888 px1=%04h exp 0C1F", mem[1]); errors=errors+1; end
+
         // --- TIMEOUT (root-cause fix): start a big blit, feed a few bytes, then a
         // datagram is "lost" - go silent. blitting must NOT stay stuck forever; after
         // TIMEOUT_CYCLES of no byte, it must abort (blitting->0, timed_out pulses), so a

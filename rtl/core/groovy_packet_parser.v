@@ -17,6 +17,13 @@
 //   9  bytes : raw blit + frame_dup flag
 //   12 bytes : lz4 blit, no flag
 //   13 bytes : lz4 blit + frame_delta flag
+//
+// CMD_BLIT_VSYNC (6) is NOT dead: it is the only blit GroovyMAME sends
+// (drawnogpu.cpp, packed struct {6, frame u32, vsync u16, cSize u32}, always 11
+// bytes even when raw, cSize = 0). groovy.cpp accepts 7 or 11 bytes, sets field 0
+// and reads cSize only when CMD_INIT asked for LZ4. This parser has no session
+// state, so it reports lz4 = (cSize != 0): the same for conformant traffic (an LZ4
+// frame is never 0 bytes, a raw GroovyMAME blit always carries cSize = 0).
 `default_nettype none
 
 module groovy_packet_parser (
@@ -81,6 +88,7 @@ module groovy_packet_parser (
     localparam CMD_SWITCHRES        = 8'd3;
     localparam CMD_AUDIO            = 8'd4;
     localparam CMD_GET_STATUS       = 8'd5;
+    localparam CMD_BLIT_VSYNC       = 8'd6;   // GroovyMAME's blit (see header)
     localparam CMD_BLIT_FIELD_VSYNC = 8'd7;
     localparam CMD_GET_VERSION      = 8'd8;
     localparam CMD_GET_FEATURES     = 8'd9;   // Groovy_Tang v2.0.0 extension
@@ -189,6 +197,19 @@ module groovy_packet_parser (
                                           (len == 6'd13) ? (pkt[12] != 8'd0) : 1'b0;
                         end else bad_packet <= 1'b1;
                     end
+                    CMD_BLIT_VSYNC: begin
+                        if (len == 6'd7 || len == 6'd11) begin
+                            blit_valid <= 1'b1;
+                            blit_frame <= {pkt[4],pkt[3],pkt[2],pkt[1]};
+                            blit_field <= 8'd0;
+                            blit_vsync <= {pkt[6],pkt[5]};
+                            blit_csize <= (len == 6'd11) ?
+                                          {pkt[10],pkt[9],pkt[8],pkt[7]} : 32'd0;
+                            blit_lz4   <= (len == 6'd11) &&
+                                          ({pkt[10],pkt[9],pkt[8],pkt[7]} != 32'd0);
+                            blit_flag  <= 1'b0;
+                        end else bad_packet <= 1'b1;
+                    end
                     CMD_GET_VERSION: begin
                         if (len == 6'd1) get_version_valid <= 1'b1; else bad_packet <= 1'b1;
                     end
@@ -204,7 +225,7 @@ module groovy_packet_parser (
                             beacon_en    <= (pkt[1] != 8'd0);
                         end else bad_packet <= 1'b1;
                     end
-                    default: bad_packet <= 1'b1;  // includes deprecated CMD_BLIT_VSYNC=6
+                    default: bad_packet <= 1'b1;
                 endcase
             end
         end

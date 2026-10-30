@@ -14,6 +14,16 @@
 //
 // Plusargs: +DIR=<dir with stream_*.hex>  +LEAD=<lines, default 24>  +GAP=<clk50m cycles
 //           forced between the BLIT header and the first pixel datagram, default 48>
+//           +GM : the stream is GroovyMAME's dialect (gen_gwline_stream.py --groovymame).
+//                 Like drawnogpu.cpp, each frame's datagrams go out back to back at wire
+//                 speed; a raw RGB888 320x240 frame needs ~19 ms on 100 Mbit (more than
+//                 a video frame, docs/protocol_conformance_2026-10.md #5), so frames are
+//                 sent every OTHER video frame and the bottom lines may arrive after the
+//                 raster: the check is then "no WRONG line" (late lines are black, by the
+//                 ring's slot tags) + every frame shows exact lines, not full frames.
+// Every ACK the FPGA sends is decoded and checked against Groovy_MiSTer's semantics:
+// frame echo, GPU frame counter (frame N scanned while it reads N), vCount (raster source
+// line, 0 = first active line) and status bit 6 (audio output available).
 `timescale 1ns/1ps
 `include "rmii.svh"
 `default_nettype none
@@ -48,7 +58,7 @@ module gwline_top_e2e_tb;
     reg [63:0] sidx   [0:1023];
     integer nframes_eth = 0, nf_net = 0;
     string dir = ".";
-    integer lead = 24, gap_hdr = 48;
+    integer lead = 24, gap_hdr = 48, gm = 0, period = 1;
 
     task automatic send_byte(input [7:0] b);
         integer k; reg [7:0] v;
@@ -74,6 +84,7 @@ module gwline_top_e2e_tb;
         void'($value$plusargs("DIR=%s", dir));
         void'($value$plusargs("LEAD=%d", lead));
         void'($value$plusargs("GAP=%d", gap_hdr));
+        if ($test$plusargs("GM")) begin gm = 1; period = 2; end
         $readmemh({dir, "/stream_bytes.hex"}, sbytes);
         $readmemh({dir, "/stream_idx.hex"}, sidx);
         while (nframes_eth < 1024 && sidx[nframes_eth] !== 64'hx && sidx[nframes_eth][55:32] != 0)
@@ -104,11 +115,13 @@ module gwline_top_e2e_tb;
         for (f = 0; f < nf_net; f = f + 1) begin
             // BLIT header timed to END gap_hdr cycles before the first pixel datagram:
             // a runt immediately followed by a full-size frame (72 bytes * 80 ns).
-            wait_until(t0 + f * FRAME_T - 72 * 80.0 - gap_hdr * 20.0);
+            wait_until(t0 + period * f * FRAME_T - 72 * 80.0 - gap_hdr * 20.0);
             send_eth(i);  i = i + 1;
-            for (d = 0; d < 120; d = d + 1) begin
-                wait_until(t0 + f * FRAME_T + d * DGRAM_T);
-                send_eth(i);  i = i + 1;
+            d = 0;
+            while (i < nframes_eth && sidx[i][63:56] == 8'd2) begin
+                if (!gm) wait_until(t0 + f * FRAME_T + d * DGRAM_T);
+                else repeat (48) @(posedge clk50m);   // gm: back to back, 96-bit Ethernet IFG
+                send_eth(i);  i = i + 1;  d = d + 1;
             end
             // after the pixels: optional audio burst (CMD_AUDIO + PCM), then the optional
             // CMD_GET_STATUS burst (replies close together)
@@ -130,7 +143,8 @@ module gwline_top_e2e_tb;
         vc1 <= dut.vcount; vc2 <= vc1; vc3 <= vc2;
         de1 <= dut.de;     de2 <= de1; de3 <= de2;
     end
-    integer vframe = -1, k, good_total, perfect_frames = 0;
+    integer vframe = -1, k, good_total, perfect_frames = 0, wrong_lines = 0;  reg nz = 0, any_good;
+    integer good_ever [0:MAXF-1];  initial for (k = 0; k < MAXF; k = k + 1) good_ever[k] = 0;
     integer bad [0:MAXF-1];  integer good_from [0:MAXF-1];  reg in_line = 0;
     initial for (k = 0; k < MAXF; k = k + 1) begin bad[k] = 0; good_from[k] = 0; end
 
@@ -150,14 +164,20 @@ module gwline_top_e2e_tb;
         end
         if (de3) begin
             in_line <= 1;
+            if (dut.pix565 != 16'h0000) nz = 1;
             for (k = 0; k < nf_net; k = k + 1)
                 if (dut.pix565 !== pix(k, vc3 / 3, hc3 >> 2)) bad[k] = bad[k] + 1;
         end else if (in_line) begin
             in_line <= 0;
+            any_good = 0;
             for (k = 0; k < nf_net; k = k + 1) begin
-                if (bad[k] == 0) good_from[k] = good_from[k] + 1;
+                if (bad[k] == 0) begin good_from[k] = good_from[k] + 1; good_ever[k] = good_ever[k] + 1; any_good = 1; end
                 bad[k] = 0;
             end
+            // a line that is neither some frame's exact line nor black (never written /
+            // late) shows wrong pixels; only counted while frames are being sent
+            if (!any_good && nz && !sender_done && vframe >= 0) wrong_lines = wrong_lines + 1;
+            nz = 0;
         end
     end
 
@@ -264,6 +284,9 @@ module gwline_top_e2e_tb;
     reg [7:0] txb [0:63];  integer txn = 0, n_beacon = 0, bc_err = 0, last_seq = -1;
     integer last_vf = -1, bc_gl_min = 9999, bc_gl_max = -1, bc_lt_min = 9999, bc_lt_max = -1;
     integer bc_vf, bc_rl, bc_gl, bc_lt, bc_sq;
+    integer n_ack = 0, n_blit_ack = 0, ack_err = 0, ak_fe, ak_gf, ak_vc, ak_exp_vc;
+    integer hdr_parsed_line = -1;           // raster source line when the BLIT header was parsed
+    always @(posedge clk50m) if (dut.blit_valid) hdr_parsed_line = dut.vcount / 3;
     always @(posedge clk50m) begin
         if (dut.tx_data_av) begin if (txn < 64) txb[txn] = dut.tx_data; txn = txn + 1; end
         if (dut.tx_req) begin
@@ -278,6 +301,23 @@ module gwline_top_e2e_tb;
                 if (sender_done == 0 && n_beacon > 3) begin       // stream running: picture health
                     if (bc_gl < bc_gl_min) bc_gl_min = bc_gl;  if (bc_gl > bc_gl_max) bc_gl_max = bc_gl;
                     if (bc_lt < bc_lt_min) bc_lt_min = bc_lt;  if (bc_lt > bc_lt_max) bc_lt_max = bc_lt;
+                end
+            end
+            if (txn == 13) begin                                   // Groovy_MiSTer ACK
+                n_ack = n_ack + 1;
+                ak_fe = {txb[3], txb[2], txb[1], txb[0]};  ak_gf = {txb[9], txb[8], txb[7], txb[6]};
+                ak_vc = {txb[11], txb[10]};
+                if (!txb[12][6]) begin ack_err = ack_err + 1; $display("ACK: status bit6 (audio) is 0"); end
+                if (ak_fe != 0) begin                               // the ACK of BLIT frame ak_fe
+                    n_blit_ack = n_blit_ack + 1;
+                    // vCount = the raster's source line when the BLIT header was taken
+                    // (720p: output line / 3, 0 = first active line); the header is
+                    // sent ~LEAD lines before the raster's top, i.e. in the frame before
+                    ak_exp_vc = hdr_parsed_line;
+                    if (ak_gf != period * (ak_fe - 1)) begin
+                        ack_err = ack_err + 1; $display("ACK: blit %0d reports GPU frame %0d, want %0d", ak_fe, ak_gf, period * (ak_fe - 1)); end
+                    if (ak_vc < ak_exp_vc - 1 || ak_vc > ak_exp_vc + 1 || ak_vc < 250 - lead - 3 || ak_vc >= 250) begin
+                        ack_err = ack_err + 1; $display("ACK: blit %0d reports vCount %0d, want ~%0d", ak_fe, ak_vc, ak_exp_vc); end
                 end
             end
             txn = 0;
@@ -298,7 +338,15 @@ module gwline_top_e2e_tb;
                      n_audio_bursts, a_pairs, a_bad, dut.a_underruns, dut.a_level, dut.a_playing);
         $display("TX %0d frames on the wire: %0d BAD, %0d UDP (%0d ACK-sized, %0d beacons), %0d ARP; %0d status requests sent; beacon trigger->wire max %0.1f us",
                  tx_frames, tx_bad, tx_udp, tx_acks, tx_beacons, tx_arp, n_status_sent, bc_delay_max / 1000.0);
-        if (perfect_frames == nf_net && dut.frame_cnt == nf_net && dut.to_cnt == 0 && tx_bad == 0 &&
+        $display("ACK %0d decoded (%0d for blits), %0d errors; %0d wrong lines shown; exact lines per network frame:",
+                 n_ack, n_blit_ack, ack_err, wrong_lines);
+        for (k = 0; k < nf_net; k = k + 1) $write(" net%0d:%0d", k, good_ever[k]);  $write("\n");
+        for (k = 0; k < nf_net; k = k + 1) if (good_ever[k] == 0) wrong_lines = wrong_lines + 1;
+        // gm: the raster overtakes the RGB888 writer mid-frame; the source line it is
+        // writing at that instant is shown half old / half new (3 output lines a frame)
+        if ((gm ? wrong_lines <= 3 * nf_net : perfect_frames == nf_net && wrong_lines == 0) &&
+            ack_err == 0 && n_blit_ack == nf_net &&
+            dut.frame_cnt == nf_net && dut.to_cnt == 0 && tx_bad == 0 &&
             (n_audio_bursts == 0 || (a_pairs > 0 && a_bad == 0)) &&
             (beacon_on_at < 0 || (n_beacon >= $rtoi(($realtime - beacon_on_at) / FRAME_T) - 1 && bc_err == 0)))
              $display("PASS: gwline_top_e2e_tb");

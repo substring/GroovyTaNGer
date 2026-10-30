@@ -11,7 +11,9 @@
 //
 // Pixels are stored as RGB565 (16-bit) to fit BRAM. bytespp from INIT rgbMode:
 //   2 = RGB565 (wire: little-endian, byte0=low)   [first-picture path]
-//   3 = RGB888 (wire byte order R,G,B [A VERIFIER]) -> packed to 565
+//   3 = RGB888, wire byte order B,G,R -> packed to 565. Checked 2026-10-30: the MiSTer
+//       core unpacks {r,g,b} <= word64[23:0] (byte0 = blue, Groovy.sv), and GroovyMAME
+//       copies MAME's little-endian ARGB32 bytes 0..2 = B,G,R (drawnogpu.cpp).
 // (rgbMode 1 = 4-byte RGBA is a later add.)
 //
 // TIMEOUT (ROOT-CAUSE FIX, 2026-07-03): a single lost UDP pixel datagram means
@@ -55,7 +57,7 @@ module groovy_blit_rx #(
         input [2:0] bpp; input [7:0] x0, x1, x2;
     begin
         if (bpp == 3'd2) pack565 = {x1, x0};                       // RGB565 LE
-        else             pack565 = {x0[7:3], x1[7:2], x2[7:3]};    // RGB888 -> 565
+        else             pack565 = {x2[7:3], x1[7:2], x0[7:3]};    // B,G,R -> 565
     end
     endfunction
 

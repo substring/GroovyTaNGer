@@ -23,6 +23,13 @@
 #                               L = 2k, R = 2k + 1 (mod 65536), checked by the testbench.
 #                           4 = CMD_GET_STATUS (--status-burst N: N of them after each
 #                               frame's last pixel datagram, back to back)
+#
+# --groovymame speaks GroovyMAME's own dialect (src/osd/modules/render/drawnogpu.cpp),
+# not the groovymister API's: a 4-byte CMD_INIT (no rgbMode -> RGB888), an 11-byte
+# CMD_BLIT_VSYNC (6) {6, frame u32, vsync u16, cSize u32 = 0}, and the frame's RGB888
+# bytes (B,G,R per pixel, MAME's little-endian ARGB) cut into 1472-byte datagrams with no
+# regard for line boundaries (nogpu_send_mtu). Each pixel's 888 value packs back to the
+# same pix() RGB565 hash, so the testbench check is unchanged.
 import argparse, os, struct
 import zlib
 from gen_gwline_frames import (build_udp_frame, cmd_init, cmd_blit_field_vsync,
@@ -51,19 +58,32 @@ def main():
                    help="enable the FPGA raster beacon (CMD_SET_BEACON 1) after CMD_INIT")
     p.add_argument("--audio", type=int, default=0,
                    help="stereo samples per frame (48 kHz: 800); 0 = no audio")
+    p.add_argument("--groovymame", action="store_true",
+                   help="GroovyMAME dialect: 4-byte INIT (RGB888), CMD_BLIT_VSYNC 6, 1472-byte chunks")
     p.add_argument("--status-burst", dest="status_burst", type=int, default=0,
                    help="CMD_GET_STATUS requests sent back to back after each frame")
     a = p.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
 
-    frames = [(5, build_arp_request()),
-              (0, build_udp_frame(cmd_init(sound_rate=3 if a.audio else 0, sound_chan=2)))]
+    rate = 3 if a.audio else 0
+    init = bytes([2, 0, rate, 2]) if a.groovymame else cmd_init(sound_rate=rate, sound_chan=2)
+    frames = [(5, build_arp_request()), (0, build_udp_frame(init))]
     k_audio = 0
     if a.beacon:
         frames.append((3, build_udp_frame(bytes([11, 1]))))   # CMD_SET_BEACON, enable
     for f in range(a.frames):
-        frames.append((1, build_udp_frame(cmd_blit_field_vsync(f + 1))))
-        for l0 in range(0, a.height, a.lines_per_dgram):
+        if a.groovymame:
+            frames.append((1, build_udp_frame(struct.pack("<BIHI", 6, f + 1, 200, 0))))
+            raw = bytearray()
+            for l in range(a.height):
+                for c in range(a.width):
+                    v = pix(f, l, c)
+                    raw += bytes([(v & 0x1F) << 3, ((v >> 5) & 0x3F) << 2, (v >> 11) << 3])
+            for o in range(0, len(raw), 1472):
+                frames.append((2, build_udp_frame(bytes(raw[o:o + 1472]))))
+        else:
+            frames.append((1, build_udp_frame(cmd_blit_field_vsync(f + 1))))
+        for l0 in (range(0, a.height, a.lines_per_dgram) if not a.groovymame else ()):
             payload = b"".join(struct.pack("<H", pix(f, l, c))
                                for l in range(l0, min(l0 + a.lines_per_dgram, a.height))
                                for c in range(a.width))

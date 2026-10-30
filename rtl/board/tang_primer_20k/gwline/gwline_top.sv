@@ -183,13 +183,14 @@ module gwline_top (
     wire [7:0]  ack_data;  wire [31:0] ack_frame_echo, ack_fpga_frame;
     wire [15:0] ack_vsync_echo, ack_fpga_vcount;  wire [7:0] ack_status;
     logic [15:0] vcount_50;               // real scanout raster line, CDC'd to clk50m
-    wire [7:0]  beamrace_status;
+    wire [7:0]  beamrace_status, ack_status_bits;
+    logic [31:0] gpu_frame;               // Groovy_MiSTer vga_frame (see below)
 
     groovy_ack_policy u_policy (
         .clk(clk50m), .rst(core_rst),
         .init_valid(init_valid), .get_status_valid(get_status_valid),
         .blit_valid(blit_valid), .blit_frame(blit_frame), .blit_vsync(blit_vsync),
-        .fpga_frame(32'd0), .fpga_vcount(vcount_50), .status_bits(beamrace_status),
+        .fpga_frame(gpu_frame), .fpga_vcount(vcount_50), .status_bits(ack_status_bits),
         .ack_busy(ack_busy), .ack_start(ack_start),
         .ack_frame_echo(ack_frame_echo), .ack_vsync_echo(ack_vsync_echo),
         .ack_fpga_frame(ack_fpga_frame), .ack_fpga_vcount(ack_fpga_vcount),
@@ -330,8 +331,13 @@ module gwline_top (
         if (gl_s1 == gl_s2) gl_50 <= gl_s2;
     end
     wire picture_ok = (gl_50 == OUT_H[9:0]);       // every output line of the last frame valid
-    // ACK status bit0: picture NOT complete; bit6 (Groovy_MiSTer "audio"): audio playing
+    // Beacon status bit0: picture NOT complete; bit6: audio playing.
     assign beamrace_status = {1'b0, a_playing, 5'd0, ~picture_ok};
+    // ACK status bit6 is Groovy_MiSTer's FPGA_AUDIO = "this receiver has an audio output
+    // enabled" (MiSTer: the core's OSD audio option), NOT "playing": GroovyMAME and the
+    // groovymister API send CMD_AUDIO only once an ACK has shown it, so tying it to
+    // playback would deadlock (playback needs audio first). The Dock's jack is always there.
+    assign ack_status_bits = {1'b0, 1'b1, 5'd0, ~picture_ok};
 
     // ---- AUDIO (CMD_AUDIO -> buffer -> PT8211 on the Dock jack), see groovy_audio.v.
     // Its payload bytes are taken here while a_receiving, like the pixels while blitting.
@@ -355,6 +361,27 @@ module gwline_top (
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) vframe_cnt <= 16'd0;
         else if (vframe_pulse_50 && vframe_cnt != 16'hFFFF) vframe_cnt <= vframe_cnt + 16'd1;
+
+    // GPU FRAME COUNTER for the ACK, with Groovy_MiSTer's semantics (rtl/vga.v
+    // vga_frame): cleared by CMD_INIT / CMD_CLOSE, it starts with the first blit and then
+    // steps once per video frame at the raster's top of frame, so frame N is the one
+    // being scanned while it reads N. Clients pace themselves on it: GroovyMAME waits
+    // (frame_req - frame_gpu) * vtotal + vcount_req - vcount_gpu lines before emulating
+    // the next frame (drawnogpu.cpp nogpu_wait_status), so a constant 0 here made it wait
+    // seconds per frame. The first blit F is shown from the next top of frame, so the
+    // counter is preset to F-1 (GroovyMAME's first blit is frame 1, like MiSTer's count
+    // from 0). After that it free-runs; a client that falls behind re-aligns itself
+    // (m_frame = frame_gpu + 1), as with MiSTer.
+    logic gpu_started;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) begin
+            gpu_frame <= 32'd0;  gpu_started <= 1'b0;
+        end else if (init_valid || close_valid) begin
+            gpu_frame <= 32'd0;  gpu_started <= 1'b0;
+        end else if (blit_valid && !gpu_started) begin
+            gpu_frame <= blit_frame - 32'd1;  gpu_started <= 1'b1;
+        end else if (vframe_pulse_50 && gpu_started)
+            gpu_frame <= gpu_frame + 32'd1;
 
     // RASTER BEACON (CMD_SET_BEACON, opt-in): one datagram per video frame, pushed when
     // the raster enters vertical blanking (source line SRC_H), so the host phase-locks on
