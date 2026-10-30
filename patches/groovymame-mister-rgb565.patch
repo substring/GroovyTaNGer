@@ -1,0 +1,156 @@
+GroovyMAME nogpu: optional RGB565 pixel format (-mister_rgb_mode rgb565)
+
+Adds the 5th CMD_INIT byte (rgbMode) that the Groovy_MiSTer protocol already defines
+(groovy.cpp accepts a 4- or 5-byte CMD_INIT; rgbMode 2 = RGB565, 2 bytes per pixel,
+little-endian) and that the MiSTer core already implements. GroovyMAME's own nogpu
+client never sent it, so it could only stream RGB888.
+
+Why: RGB565 is 2/3 of the RGB888 bandwidth. On a 100 Mbit receiver (Groovy_TaNGer,
+Tang Primer 20K) raw RGB888 does not fit a 320x240@60 beam race (116 Mbit/s on the
+wire), RGB565 does (77 Mbit/s). On MiSTer it also lowers bandwidth and latency.
+
+- new option mister_rgb_mode: rgb888 (default, unchanged behaviour) or rgb565
+- rgb888 keeps the original 4-byte CMD_INIT, so older servers are unaffected
+- rgb565: CMD_INIT is 5 bytes with rgbMode = 2; pixels are packed from MAME's B,G,R,A
+  bytes as ((R & F8) << 8) | ((G & FC) << 3) | (B >> 3), sent low byte first
+- frame sizes (raw send, lz4, lz4hc) use the bytes per pixel instead of a fixed 3
+
+Base: substring/GroovyMAME 4ce01b9 (libretro-driver). Apply with
+  git apply -p1 groovymame-mister-rgb565.patch
+Checked: applies cleanly; drawnogpu.cpp and osdobj_common.cpp compile (g++ -std=c++20
+-Werror -fsyntax-only). Not yet run against a receiver.
+
+diff -ru a/src/osd/modules/lib/osdobj_common.cpp b/src/osd/modules/lib/osdobj_common.cpp
+--- a/src/osd/modules/lib/osdobj_common.cpp	2026-10-30 15:46:31.259851853 +0100
++++ b/src/osd/modules/lib/osdobj_common.cpp	2026-10-30 15:46:31.288849795 +0100
+@@ -155,6 +155,7 @@
+ 	{ OSDOPTION_MISTER_WINDOW,                   "0",              core_options::option_type::BOOLEAN,   "nogpu show client window (affects performace)" },
+ 	{ OSDOPTION_MISTER_FD_MARGIN,                "1.5",            core_options::option_type::FLOAT,     "nogpu security margin for automatic frame delay, in ms."},
+ 	{ OSDOPTION_MISTER_INTERLACED_FB,            "1",              core_options::option_type::BOOLEAN,   "nogpu blit odd/even lines separately."},
++	{ OSDOPTION_MISTER_RGB_MODE,                 "rgb888",         core_options::option_type::STRING,    "nogpu pixel format sent over the network (rgb888, rgb565)" },
+ 
+ 	{ nullptr,                                   nullptr,          core_options::option_type::HEADER,    "OSD ACCELERATED VIDEO OPTIONS" },
+ 	{ OSDOPTION_FILTER ";glfilter;flt",          "0",              core_options::option_type::BOOLEAN,   "use bilinear filtering when scaling emulated video" },
+diff -ru a/src/osd/modules/lib/osdobj_common.h b/src/osd/modules/lib/osdobj_common.h
+--- a/src/osd/modules/lib/osdobj_common.h	2026-10-30 15:46:31.253425039 +0100
++++ b/src/osd/modules/lib/osdobj_common.h	2026-10-30 15:46:31.288696418 +0100
+@@ -134,6 +134,7 @@
+ #define OSDOPTION_MISTER_WINDOW         "mister_window"
+ #define OSDOPTION_MISTER_FD_MARGIN      "mister_fd_margin"
+ #define OSDOPTION_MISTER_INTERLACED_FB  "mister_interlaced_fb"
++#define OSDOPTION_MISTER_RGB_MODE       "mister_rgb_mode"
+ 
+ #define OSDOPTVAL_AUTO                  "auto"
+ #define OSDOPTVAL_NONE                  "none"
+@@ -223,6 +224,7 @@
+ 	bool mister_window() const { return bool_value(OSDOPTION_MISTER_WINDOW); }
+ 	float mister_fd_margin() const { return float_value(OSDOPTION_MISTER_FD_MARGIN); }
+ 	bool mister_interlaced_fb() const { return bool_value(OSDOPTION_MISTER_INTERLACED_FB); }
++	const char *mister_rgb_mode() const { return value(OSDOPTION_MISTER_RGB_MODE); }
+ 
+ 	// accelerated video options
+ 	bool filter() const { return bool_value(OSDOPTION_FILTER); }
+diff -ru a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawnogpu.cpp
+--- a/src/osd/modules/render/drawnogpu.cpp	2026-10-30 15:46:31.247907660 +0100
++++ b/src/osd/modules/render/drawnogpu.cpp	2026-10-30 15:46:45.476483441 +0100
+@@ -105,6 +105,7 @@
+ 	uint8_t	compression;
+ 	uint8_t sound_rate;
+ 	uint8_t sound_channels;
++	uint8_t rgb_mode;	// 0 = RGB888, 2 = RGB565; only sent (5-byte CMD_INIT) when not RGB888
+ } cmd_init;
+ 
+ typedef struct cmd_close
+@@ -177,6 +178,8 @@
+ 	bool m_initialized = false;
+ 	bool m_first_blit = true;
+ 	int m_compression = 0;
++	int m_rgb_mode = 0;	// CMD_INIT rgbMode: 0 = RGB888, 2 = RGB565
++	int m_bpp = 3;		// bytes per pixel on the wire
+ 	bool m_show_window = false;
+ 	bool m_is_internal_fe = false;
+ 	bool m_autofilter = false;
+@@ -410,10 +413,21 @@
+ 	{
+ 		for (j = 0; j < m_width * 4; j += 4)
+ 		{
+-			m_fb[k] = (char)m_bmdata[i+j];
+-			m_fb[k+1] = (char)m_bmdata[i+j+1];
+-			m_fb[k+2] = (char)m_bmdata[i+j+2];
+-			k += 3;
++			if (m_rgb_mode == 2)
++			{
++				// RGB565 little-endian, from MAME's B,G,R,A bytes
++				uint16_t p = ((m_bmdata[i+j+2] & 0xF8) << 8) | ((m_bmdata[i+j+1] & 0xFC) << 3) | (m_bmdata[i+j] >> 3);
++				m_fb[k] = (char)(p & 0xFF);
++				m_fb[k+1] = (char)(p >> 8);
++				k += 2;
++			}
++			else
++			{
++				m_fb[k] = (char)m_bmdata[i+j];
++				m_fb[k+1] = (char)m_bmdata[i+j+1];
++				m_fb[k+2] = (char)m_bmdata[i+j+2];
++				k += 3;
++			}
+ 		}
+ 	}
+ 
+@@ -550,6 +564,18 @@
+ 	else if (strcmp(compression, "none"))
+ 		osd_printf_verbose("nogpu: compression algorithm %s not supported\n", compression);
+ 
++	m_rgb_mode = 0; // RGB888
++	m_bpp = 3;
++	const char* rgb_mode = options.mister_rgb_mode();
++	if (!strcmp(rgb_mode, "rgb565"))
++	{
++		m_rgb_mode = 2;
++		m_bpp = 2;
++		osd_printf_verbose("nogpu: pixel format %s\n", rgb_mode);
++	}
++	else if (strcmp(rgb_mode, "rgb888"))
++		osd_printf_verbose("nogpu: pixel format %s not supported, using rgb888\n", rgb_mode);
++
+ 	switch(options.sample_rate())
+ 	{
+ 		case 22050:
+@@ -570,6 +596,7 @@
+ 	cmd_init command;
+ 	command.compression = m_compression ? 1 : 0;
+ 	command.sound_rate = m_sample_rate;
++	command.rgb_mode = m_rgb_mode;
+ 	command.sound_channels = m_channels;
+ 
+ 	// Reset current mode
+@@ -592,7 +619,8 @@
+ 	m_interlaced_fb = options.mister_interlaced_fb();
+ 	m_is_internal_fe = strcmp(window().machine().system().name, "___empty") == 0;
+ 
+-	if (nogpu_send_command(&command, sizeof(command)))
++	// RGB888 keeps the original 4-byte CMD_INIT, so older servers are unaffected
++	if (nogpu_send_command(&command, m_rgb_mode ? sizeof(command) : sizeof(command) - 1))
+ 		return nogpu_wait_ack(1000);
+ 
+ 	return false;
+@@ -903,9 +931,9 @@
+ 	m_vsync_scanline = std::min<int>((m_current_mode.vtotal) * m_frame_delay + vsync_offset + 1, m_current_mode.vtotal);
+ 
+ 	if (m_compression == 1)
+-		compressed_data_size = LZ4_compress_default((char *)&m_fb[0], (char *)&m_fb_compressed[0], width * height * 3, LZ4_COMPRESSBOUND(MAX_BUFFER_HEIGHT * MAX_BUFFER_WIDTH * 3));
++		compressed_data_size = LZ4_compress_default((char *)&m_fb[0], (char *)&m_fb_compressed[0], width * height * m_bpp, LZ4_COMPRESSBOUND(MAX_BUFFER_HEIGHT * MAX_BUFFER_WIDTH * 3));
+ 	else if(m_compression == 2)
+-		compressed_data_size = LZ4_compress_HC((char *)&m_fb[0], (char *)&m_fb_compressed[0], width * height * 3, LZ4_COMPRESSBOUND(MAX_BUFFER_HEIGHT * MAX_BUFFER_WIDTH * 3), LZ4HC_CLEVEL_DEFAULT);
++		compressed_data_size = LZ4_compress_HC((char *)&m_fb[0], (char *)&m_fb_compressed[0], width * height * m_bpp, LZ4_COMPRESSBOUND(MAX_BUFFER_HEIGHT * MAX_BUFFER_WIDTH * 3), LZ4HC_CLEVEL_DEFAULT);
+ 
+ 	// Send CMD_BLIT
+ 	cmd_blit_vsync command;
+@@ -915,7 +943,7 @@
+ 	nogpu_send_command(&command, sizeof(command));
+ 
+ 	if (m_compression == 0)
+-		nogpu_send_mtu(&m_fb[0], width * height * 3, 1472);
++		nogpu_send_mtu(&m_fb[0], width * height * m_bpp, 1472);
+ 
+ 	else
+ 		nogpu_send_mtu(&m_fb_compressed[0], (int)compressed_data_size, 1472);
