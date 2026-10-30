@@ -55,19 +55,23 @@ module gwline_top (
     //   60.05 Hz, 1x1, hsync 32 px = 4.7 us, vsync 3 lines, negative syncs) - for 15 kHz CRTs
     //   and to find whether an HDMI->VGA converter accepts a pixel clock far below 25 MHz.
     //   Host: blitrace --vtotal 262 --vactive 240 --refresh 60.0547.
+    // VIDEO_MODE 3: the SAME 15 kHz 240p raster (15.734 kHz / 60.05 Hz) with each pixel
+    //   repeated 4x horizontally (1280 x 240 at 27 MHz = 27*5/1/5, above the ~25 MHz HDMI
+    //   floor): "super-resolution" for converters that refuse a low pixel clock. Same host
+    //   options as mode 2.
     localparam integer VIDEO_MODE = 0;
     localparam [15:0] SRC_W = 16'd320, SRC_H = 16'd240;
-    localparam [15:0] OUT_W = (VIDEO_MODE == 2) ? 16'd320 : (VIDEO_MODE == 1) ? 16'd640 : 16'd1280;
-    localparam [15:0] OUT_H = (VIDEO_MODE == 2) ? 16'd240 : (VIDEO_MODE == 1) ? 16'd480 : 16'd720;
-    localparam integer HREP = (VIDEO_MODE == 2) ? 1 : (VIDEO_MODE == 1) ? 2 : 4;
-    localparam integer VREP = (VIDEO_MODE == 2) ? 1 : (VIDEO_MODE == 1) ? 2 : 3;
-    localparam integer HSH  = (VIDEO_MODE == 2) ? 0 : (VIDEO_MODE == 1) ? 1 : 2;
-    localparam [15:0] H_TOTAL = (VIDEO_MODE == 2) ? 16'd429 : (VIDEO_MODE == 1) ? 16'd800 : 16'd1650;
-    localparam [15:0] H_SYNC0 = (VIDEO_MODE == 2) ? 16'd340 : (VIDEO_MODE == 1) ? 16'd656 : 16'd1390;
-    localparam [15:0] H_SYNC1 = (VIDEO_MODE == 2) ? 16'd372 : (VIDEO_MODE == 1) ? 16'd752 : 16'd1430;
-    localparam [15:0] V_TOTAL = (VIDEO_MODE == 2) ? 16'd262 : (VIDEO_MODE == 1) ? 16'd525 : 16'd750;
-    localparam [15:0] V_SYNC0 = (VIDEO_MODE == 2) ? 16'd243 : (VIDEO_MODE == 1) ? 16'd490 : 16'd725;
-    localparam [15:0] V_SYNC1 = (VIDEO_MODE == 2) ? 16'd246 : (VIDEO_MODE == 1) ? 16'd492 : 16'd730;
+    localparam [15:0] OUT_W = (VIDEO_MODE == 3) ? 16'd1280 : (VIDEO_MODE == 2) ? 16'd320 : (VIDEO_MODE == 1) ? 16'd640 : 16'd1280;
+    localparam [15:0] OUT_H = (VIDEO_MODE >= 2) ? 16'd240 : (VIDEO_MODE == 1) ? 16'd480 : 16'd720;
+    localparam integer HREP = (VIDEO_MODE == 3) ? 4 : (VIDEO_MODE == 2) ? 1 : (VIDEO_MODE == 1) ? 2 : 4;
+    localparam integer VREP = (VIDEO_MODE >= 2) ? 1 : (VIDEO_MODE == 1) ? 2 : 3;
+    localparam integer HSH  = (VIDEO_MODE == 3) ? 2 : (VIDEO_MODE == 2) ? 0 : (VIDEO_MODE == 1) ? 1 : 2;
+    localparam [15:0] H_TOTAL = (VIDEO_MODE == 3) ? 16'd1716 : (VIDEO_MODE == 2) ? 16'd429 : (VIDEO_MODE == 1) ? 16'd800 : 16'd1650;
+    localparam [15:0] H_SYNC0 = (VIDEO_MODE == 3) ? 16'd1360 : (VIDEO_MODE == 2) ? 16'd340 : (VIDEO_MODE == 1) ? 16'd656 : 16'd1390;
+    localparam [15:0] H_SYNC1 = (VIDEO_MODE == 3) ? 16'd1488 : (VIDEO_MODE == 2) ? 16'd372 : (VIDEO_MODE == 1) ? 16'd752 : 16'd1430;
+    localparam [15:0] V_TOTAL = (VIDEO_MODE >= 2) ? 16'd262 : (VIDEO_MODE == 1) ? 16'd525 : 16'd750;
+    localparam [15:0] V_SYNC0 = (VIDEO_MODE >= 2) ? 16'd243 : (VIDEO_MODE == 1) ? 16'd490 : 16'd725;
+    localparam [15:0] V_SYNC1 = (VIDEO_MODE >= 2) ? 16'd246 : (VIDEO_MODE == 1) ? 16'd492 : 16'd730;
     localparam        SYNC_POS = (VIDEO_MODE == 0) ? 1'b1 : 1'b0;
     localparam integer NATIVE_PIX = 320*240;
     localparam integer FB_ADDR_W  = 17;
@@ -271,9 +275,9 @@ module gwline_top (
     // PIXEL CLOCK (720p) - the only PLL now (no DDR3 clocks)
     // =========================================================================
     wire serial_clk, tmds_lock, pix_clk;
-    rpll_tmds #(.IDIV_SEL ((VIDEO_MODE == 2) ? 3  : (VIDEO_MODE == 1) ? 2  : 3),
-                .FBDIV_SEL((VIDEO_MODE == 2) ? 4  : (VIDEO_MODE == 1) ? 13 : 54),
-                .ODIV_SEL ((VIDEO_MODE == 2) ? 16 : (VIDEO_MODE == 1) ? 8  : 2))
+    rpll_tmds #(.IDIV_SEL ((VIDEO_MODE == 3) ? 0 : (VIDEO_MODE == 2) ? 3  : (VIDEO_MODE == 1) ? 2  : 3),
+                .FBDIV_SEL((VIDEO_MODE == 3) ? 4 : (VIDEO_MODE == 2) ? 4  : (VIDEO_MODE == 1) ? 13 : 54),
+                .ODIV_SEL ((VIDEO_MODE == 3) ? 4 : (VIDEO_MODE == 2) ? 16 : (VIDEO_MODE == 1) ? 8  : 2))
         u_tmdspll (.clkin(clk), .clkout(serial_clk), .lock(tmds_lock));
     wire hdmi_rst_n = rst & tmds_lock;
     CLKDIV u_div (.RESETN(hdmi_rst_n), .HCLKIN(serial_clk), .CLKOUT(pix_clk), .CALIB(1'b1));
