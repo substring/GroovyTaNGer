@@ -114,6 +114,19 @@ stops answering, button S0 resets it without reflashing.
      add lag (audio latency, item 9) and reject or deinterlace interlaced modes.
    (RGB888 *and* native analog would need our own DAC on free pins, item 11.)
 
+13. **Information overlay (user, 2026-10-30)**: for ~10 s, show the requested resolution,
+   refresh rate, line rate, scale factors and pixel clock over the picture, white pixel-font
+   text with a 1-px black outline, drawn in source pixels (40 columns max with an 8-px font).
+   Mockups made with three console fonts (VGA 8x8, VGA 8x16, Terminus Bold 8x16 - Terminus
+   is OFL, the safest licence to embed); font and position still to choose. Font ROM ~1.5 KB
+   (one BSRAM), 2x40-char text buffer, numbers via `binary_to_bcd.v`. Shown at start-up and on
+   every mode change (once SWITCHRES drives the geometry).
+14. **Dock buttons for the overlay, maybe a real OSD (user, 2026-10-30)**: S0 (T10) is our
+   reset; S1 = T3 (both Sipeed examples agree) would show/hide the overlay. The other three
+   disagree between Sipeed examples (LiteX: T2 D7 C7; test_board: T4 E8 E9) - check on the
+   board over the UART before using them. These pins sit on the DDR3's 1.5 V bank: declare them
+   LVCMOS15. Needs a ~10 ms debounce. Later: a small OSD menu driven by the buttons.
+
 ## Parked
 
 **DDR3 full-frame path (`gwddr3net`)**: the network -> DDR3 -> HDMI path is bit-exact (port
