@@ -186,3 +186,48 @@ modes are where pacing matters, on the 15 kHz raster too:
 
 To check on the hardware: a 256- or 320-wide mode without `-mister_pacing` (expect
 glitches in the lower part of the picture), then with it.
+
+## Pacing on Windows and macOS (discussion 2026-10-31, nothing implemented)
+
+`SO_MAX_PACING_RATE` and the fq qdisc are Linux-only.
+- **Windows**: the QoS API (qWAVE, `QOSSetOutgoingRate`) shapes one UDP flow through the
+  OS packet scheduler, the closest equivalent (sendto still returns at once). Its
+  shaping granularity is unknown: if it releases ~1 ms bursts, that is ~16 lines, half the
+  ring. To measure before relying on it.
+- **macOS**: no per-socket pacing; dummynet (`dnctl`/`pf`) shapes the whole machine,
+  needs root - not recommended.
+- **Portable answer: a sender thread in GroovyMAME.** The emulation thread copies the
+  frame into a buffer and returns; the sender thread sends chunks of 4-8 lines
+  (0.25-0.5 ms) at the raster's pace (high-resolution waitable timers on Windows 10+,
+  precise timers on macOS, a short spin as last resort). Same code on all three OSes;
+  fq stays a zero-CPU option on Linux.
+- FPGA side, client-independent: ring-writer back-pressure (udp.sv's 8 KB RX FIFO absorbs
+  ~12 lines of jitter) and/or a bigger ring.
+- The frame-delay constraint (fd >= ~8.9 at 262 lines) comes from the ring size, not
+  the OS.
+
+## RGB888 is a link-throughput problem, not a buffering one (user, 2026-10-31)
+
+The ring stores RGB565 whatever the wire format (blit_rx converts), so a bigger ring or
+pacing only addresses RGB565, whose burst arrives TOO FAST. Raw RGB888 at 320x240@60
+needs 116 Mbit/s on the wire, more than the Dock's 100: each frame takes ~19 ms while one
+comes every 16.7 ms, the delay grows frame after frame and no buffer can fix it. Raw
+RGB888 only fits up to ~256 px wide (256x224: 86 Mbit/s, 256x240: 92 Mbit/s). Beyond
+that, RGB888 needs compression.
+
+## Compression: QOI, not LZ4 (user decision, 2026-10-31)
+
+LZ4 is dropped as too complex to handle here (64 KB back-references across a frame, while
+the ring keeps 32 lines). **QOI** ("Quite OK Image" format) is the chosen codec; a Verilog
+implementation already exists (which one, and its licence, to check before reuse). The
+protocol already reserves it: `groovy_features.v` advertises compression bit 3 = QOI.
+Design points to settle when it starts:
+- reset the QOI state (previous pixel, 64-entry colour index) at each line or datagram, so
+  every datagram decodes on its own (a lost datagram costs only its own lines) and the
+  decoder fits the beam race with no frame history;
+- worst case QOI expands (QOI_OP_RGB = 4 bytes per pixel): a per-line raw fallback keeps
+  the wire time bounded;
+- compressed lines arrive even faster than raw RGB565, so pacing / back-pressure matter
+  MORE, not less;
+- client side: a GroovyMAME encoder (per line, cheap) + negotiation through GET_FEATURES
+  and the CMD_INIT compression byte, without breaking stock MiSTer (which only knows 0/1).

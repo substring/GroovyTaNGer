@@ -147,6 +147,11 @@ stops answering, button S0 resets it without reflashing.
    host for pads. Note for users; possible alternative = arcade controls / JAMMA wired to
    free Dock pins, sent as protocol input packets.
 
+6. **Compression = QOI** (user decision 2026-10-31, LZ4 dropped): needed for RGB888 beyond
+   ~256 px wide on 100 Mbit. Design notes in `docs/groovymame_client.md`.
+7. **Pacing on Windows / macOS**: no fq there; portable answer = a sender thread in
+   GroovyMAME (notes in `docs/groovymame_client.md`).
+
 How to set up a GroovyMAME run (rgb565 + pacing patches, fq qdisc): the recap at the top
 of `docs/groovymame_client.md`.
 
