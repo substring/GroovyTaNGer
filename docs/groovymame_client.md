@@ -219,7 +219,24 @@ that, RGB888 needs compression.
 
 LZ4 is dropped as too complex to handle here (64 KB back-references across a frame, while
 the ring keeps 32 lines). **QOI** ("Quite OK Image" format) is the chosen codec; a Verilog
-implementation already exists (which one, and its licence, to check before reuse). The
+implementation already exists: **amstan/qoi-fpga** (github.com/amstan/qoi-fpga, Alexandru
+M Stan, 2022-2023; `verilog/qoi_decoder.v` 127 lines, `qoi_encoder.v` 140 lines).
+Reviewed 2026-10-31:
+- **licence: none.** The repo is a fork of phoboslab/qoi (MIT, whose C files keep their
+  MIT header), but it has no LICENSE file, GitHub reports no licence, and the two Verilog
+  files carry no header. By default that means all rights reserved: we cannot vendor them
+  as they are. Either ask the author to add a licence (MIT like the parent would be the
+  natural choice), or write our own decoder from the public QOI specification and use
+  theirs only as a cross-check.
+- **fit**: a complete decoder, 1 pixel per clock (all QOI_OPs, run handled by holding
+  the chunk), consuming a 5-byte window with a `chunk_len_consumed` count, so it needs a
+  byte-stream front end. The 64-entry colour index is a 64 x 32-bit register array with
+  a combinational read and a one-cycle reset: convenient for a per-line state reset,
+  but ~2k flip-flops plus wide muxes on the GW2A-18 (24-bit entries without alpha would
+  cut that). Written in SystemVerilog (array ports, `signed'()`, `'{default: 0}`, `--`),
+  to check against Gowin's synthesis.
+- the encoder is not needed on the FPGA: the client side (GroovyMAME) can use the MIT
+  reference `qoi.h`. The
 protocol already reserves it: `groovy_features.v` advertises compression bit 3 = QOI.
 Design points to settle when it starts:
 - reset the QOI state (previous pixel, 64-entry colour index) at each line or datagram, so
