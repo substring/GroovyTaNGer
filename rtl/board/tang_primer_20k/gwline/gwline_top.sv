@@ -59,6 +59,11 @@ module gwline_top (
     //   repeated 4x horizontally (1280 x 240 at 27 MHz = 27*5/1/5, above the ~25 MHz HDMI
     //   floor): "super-resolution" for converters that refuse a low pixel clock. Same host
     //   options as mode 2.
+    // INTERLACE (CMD_SWITCHRES interlace != 0): a blit carries ONE FIELD (GroovyMAME's
+    //   default -mister_interlaced_fb 1: vactive/2 lines, the field picked from ACK bit 5),
+    //   shown like a progressive frame of vactive/2 lines. In VIDEO_MODE 2/3 the raster
+    //   itself becomes 2:1 interlaced (fields of 263/262 lines, half-line VSYNC, see
+    //   video_timing_gen_il.v); the 720p/480p modes stay progressive (each field bobbed).
     localparam integer VIDEO_MODE = 0;
     localparam [15:0] SRC_W = 16'd320, SRC_H = 16'd240;
     localparam [15:0] OUT_W = (VIDEO_MODE == 3) ? 16'd1280 : (VIDEO_MODE == 2) ? 16'd320 : (VIDEO_MODE == 1) ? 16'd640 : 16'd1280;
@@ -148,6 +153,7 @@ module gwline_top (
     wire [31:0] blit_frame;  wire [15:0] blit_vsync;
     wire [63:0] sr_pclk;
     wire [15:0] sr_ha, sr_hb, sr_he, sr_ht, sr_va, sr_vb, sr_ve, sr_vt;
+    wire [7:0]  sr_il;
     wire        blitting;  wire [2:0] cfg_bpp;
 
     groovy_packet_parser u_parser (
@@ -162,7 +168,7 @@ module gwline_top (
         .beacon_valid(beacon_valid), .beacon_en(beacon_en),
         .init_lz4(i_lz4), .init_sound_rate(i_sr), .init_sound_chan(i_sc), .init_rgb_mode(i_rgb),
         .sr_pclk(sr_pclk), .sr_h_active(sr_ha), .sr_h_begin(sr_hb), .sr_h_end(sr_he), .sr_h_total(sr_ht),
-        .sr_v_active(sr_va), .sr_v_begin(sr_vb), .sr_v_end(sr_ve), .sr_v_total(sr_vt), .sr_interlace(),
+        .sr_v_active(sr_va), .sr_v_begin(sr_vb), .sr_v_end(sr_ve), .sr_v_total(sr_vt), .sr_interlace(sr_il),
         .audio_size(audio_size),
         .blit_frame(blit_frame), .blit_field(), .blit_vsync(blit_vsync),
         .blit_lz4(), .blit_csize(), .blit_flag()
@@ -182,6 +188,7 @@ module gwline_top (
     wire [7:0]  ack_data;  wire [31:0] ack_frame_echo, ack_fpga_frame;
     wire [15:0] ack_vsync_echo, ack_fpga_vcount;  wire [7:0] ack_status;
     logic [15:0] vcount_50;               // real scanout raster line, CDC'd to clk50m
+    logic [15:0] ack_vcount_50;           // the same in Groovy_MiSTer vCount units (see below)
     wire [7:0]  beamrace_status, ack_status_bits;
     logic [31:0] gpu_frame;               // Groovy_MiSTer vga_frame (see below)
 
@@ -189,7 +196,7 @@ module gwline_top (
         .clk(clk50m), .rst(core_rst),
         .init_valid(init_valid), .get_status_valid(get_status_valid),
         .blit_valid(blit_valid), .blit_frame(blit_frame), .blit_vsync(blit_vsync),
-        .fpga_frame(gpu_frame), .fpga_vcount(vcount_50), .status_bits(ack_status_bits),
+        .fpga_frame(gpu_frame), .fpga_vcount(ack_vcount_50), .status_bits(ack_status_bits),
         .ack_busy(ack_busy), .ack_start(ack_start),
         .ack_frame_echo(ack_frame_echo), .ack_vsync_echo(ack_vsync_echo),
         .ack_fpga_frame(ack_fpga_frame), .ack_fpga_vcount(ack_fpga_vcount),
@@ -260,16 +267,29 @@ module gwline_top (
     // that never come and swallow the next frame. The raster is still fixed (VIDEO_MODE):
     // a shorter picture leaves black lines at the bottom, a wider one is cut at the right
     // (and beyond LINE_W columns per slot, see groovy_linewr).
+    //
+    // INTERLACED modelines (Groovy_MiSTer interlace field: 0 progressive, 1 = one field
+    // per blit, 2 = the whole frame per blit): src_h is the height of ONE FIELD
+    // (vactive/2), which is what the ring and the raster show. With interlace 1
+    // (GroovyMAME's default -mister_interlaced_fb 1) a blit is exactly one field. With
+    // interlace 2 the blit carries both fields (MiSTer drops every other line); it is
+    // consumed whole so the stream stays in step, but NOT displayed correctly here (the
+    // ring would show the frame's top half): it needs twice the bandwidth, which 100 Mbit
+    // does not have for any useful mode (docs/groovymame_client.md, interlace).
     logic [15:0] src_w = SRC_W, src_h = SRC_H;
+    logic        src_il = 1'b0, src_il_whole = 1'b0;
     always_ff @(posedge clk50m)
-        if (core_rst) begin
-            src_w <= SRC_W;  src_h <= SRC_H;
+        if (core_rst || init_valid) begin
+            src_w <= SRC_W;  src_h <= SRC_H;  src_il <= 1'b0;  src_il_whole <= 1'b0;
         end else if (switchres_valid && sr_ha != 16'd0 && sr_va != 16'd0) begin
-            src_w <= sr_ha;  src_h <= sr_va;
+            src_w <= sr_ha;
+            src_h <= (sr_il != 8'd0) ? {1'b0, sr_va[15:1]} : sr_va;
+            src_il <= (sr_il != 8'd0);  src_il_whole <= (sr_il == 8'd2);
         end
     // registered: blit_rx latches it at each CMD_BLIT header
     logic [31:0]          bytes_len;
-    always_ff @(posedge clk50m) bytes_len <= src_w * src_h * cfg_bpp;
+    always_ff @(posedge clk50m)
+        bytes_len <= src_w * (src_il_whole ? {src_h[14:0], 1'b0} : src_h) * cfg_bpp;
     wire blit_timed_out;
     // TIMEOUT_CYCLES = 8ms @ 50MHz. The default (1ms) was too tight: a plain sleep()-paced
     // test sender's OWN scheduler jitter occasionally exceeded 1ms between lines, which
@@ -301,16 +321,21 @@ module gwline_top (
     // 720p timing - FREE-RUNNING. The raster is the system's master clock: it never
     // waits for the network (HDMI sync is valid from reset, host or no host).
     // =========================================================================
-    wire        de, hsync, vsync, line_start, frame_start;
+    // Interlace is only generated on the 15 kHz rasters (modes 2/3); src_il is static
+    // between modelines, so a plain two-flop synchroniser is enough (the generator
+    // samples it once per field).
+    wire        de, hsync, vsync, line_start, frame_start, field;
     wire [15:0] hcount, vcount;
-    video_timing_gen u_timing (
-        .clk(pix_clk), .rst(~hdmi_rst_n), .en(1'b1),
+    logic [1:0] il_pix;
+    always_ff @(posedge pix_clk) il_pix <= {il_pix[0], src_il && (VIDEO_MODE >= 2)};
+    video_timing_gen_il u_timing (
+        .clk(pix_clk), .rst(~hdmi_rst_n), .en(1'b1), .interlace(il_pix[1]),
         .h_total(H_TOTAL), .h_active(OUT_W), .h_sync_begin(H_SYNC0), .h_sync_end(H_SYNC1),
         .v_total(V_TOTAL), .v_active(OUT_H), .v_sync_begin(V_SYNC0), .v_sync_end(V_SYNC1),
         .h_sync_pos(SYNC_POS), .v_sync_pos(SYNC_POS),
         .hcount(hcount), .vcount(vcount),
         .hsync(hsync), .vsync(vsync), .de(de),
-        .line_start(line_start), .frame_start(frame_start));
+        .line_start(line_start), .frame_start(frame_start), .field(field));
 
     // =========================================================================
     // LINE RING: blit_rx pixels in (clk50m), raster pixels out (pix_clk).
@@ -334,6 +359,15 @@ module gwline_top (
     // raster source line for the ACK vCount (host phase-lock feedback); already Gray-
     // synchronised into clk50m inside the ring.
     always_ff @(posedge clk50m) vcount_50 <= src_line_wr;
+    // Field being scanned (Groovy_MiSTer VGA_F1, ACK status bit 5): 0 = even source
+    // lines, 1 = odd. Synchronised like vframe_tgl (same depth), so it changes together
+    // with gpu_frame. With an interlaced source, the ACK vCount is in FRAME lines like
+    // MiSTer's v_cnt (2 * field line + field): GroovyMAME computes
+    // ((frame_req - frame_gpu) * vtotal + vcount_req - vcount_gpu) / 2 with vtotal = 525.
+    logic [2:0] field_50;
+    always_ff @(posedge clk50m) field_50 <= {field_50[1:0], field};
+    always_ff @(posedge clk50m)
+        ack_vcount_50 <= src_il ? {src_line_wr[14:0], field_50[1]} : src_line_wr;
 
     // good_lines changes once per video frame in pix_clk; take it into clk50m only when
     // two consecutive samples agree, so the update instant can never be seen torn.
@@ -347,11 +381,12 @@ module gwline_top (
     wire picture_ok = (gl_50 == src_out_h[9:0]);
     // Beacon status bit0: picture NOT complete; bit6: audio playing.
     assign beamrace_status = {1'b0, a_playing, 5'd0, ~picture_ok};
+    // ACK status bit5 is VGA_F1 (the field being scanned, see field_50).
     // ACK status bit6 is Groovy_MiSTer's FPGA_AUDIO = "this receiver has an audio output
     // enabled" (MiSTer: the core's OSD audio option), NOT "playing": GroovyMAME and the
     // groovymister API send CMD_AUDIO only once an ACK has shown it, so tying it to
     // playback would deadlock (playback needs audio first). The Dock's jack is always there.
-    assign ack_status_bits = {1'b0, 1'b1, 5'd0, ~picture_ok};
+    assign ack_status_bits = {1'b0, 1'b1, field_50[1], 4'd0, ~picture_ok};
 
     // ---- AUDIO (CMD_AUDIO -> buffer -> PT8211 on the Dock jack), see groovy_audio.v.
     // Its payload bytes are taken here while a_receiving, like the pixels while blitting.

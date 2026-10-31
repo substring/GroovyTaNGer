@@ -187,6 +187,50 @@ modes are where pacing matters, on the 15 kHz raster too:
 To check on the hardware: a 256- or 320-wide mode without `-mister_pacing` (expect
 glitches in the lower part of the picture), then with it.
 
+## Interlace (implemented 2026-10-31, sim only, not HW-tested)
+
+Why it "did not work at all" on the first run: GroovyMAME's `-mister_interlaced_fb`
+defaults to 1, which means **each blit is ONE field** (`vactive/2` lines,
+drawnogpu.cpp: `nogpu_blit(m_frame, m_width, m_height / interlace_factor)`), and the
+CMD_SWITCHRES modeline says `interlace = 1`. The FPGA ignored the flag and waited for
+`vactive` lines per blit: every blit swallowed the next one and timed out.
+
+What the client expects (Groovy_MiSTer `rtl/vga.v`, drawnogpu.cpp):
+
+| Item | Groovy_MiSTer semantics | gwline now |
+|---|---|---|
+| Blit size | `interlace = 1`: one field = `H x V/2`; `= 2`: whole frame, the core drops every other line | `= 1`: one field, shown like a progressive frame of `V/2` lines. `= 2`: consumed whole (stream stays in step) but not displayed correctly (needs 2x the bandwidth) |
+| Frame counter | `vga_frame` steps once per **field** | the same (our raster "frame" is a field) |
+| ACK status bit 5 (`VGA_F1`) | field being scanned: 0 = even lines, 1 = odd | `field` from the raster |
+| ACK vCount | in **frame** lines: `v_cnt` runs 0,2,4.. (even field) or 1,3,5.. (odd) | `2 * field line + field` while the modeline is interlaced |
+| Which field the client sends | `m_field = F1 ^ ((m_frame - frame_gpu) % 2)`: the parity of the field that will scan frame `m_frame` | nothing to do on our side |
+| Pacing | `lines_to_wait = ((frame_req - frame_gpu) * vtotal + vcount_req - vcount_gpu) / 2`, `vtotal` = 525 | consistent with the two rows above |
+
+The raster (VIDEO_MODE 2/3 only, `rtl/generic/video/video_timing_gen_il.v`): fields of
+263 lines (top, even source lines, VSYNC starting and ending half a line late) and 262
+lines (bottom, odd lines, line-aligned VSYNC), so VSYNC starts are exactly 262.5 lines
+apart (checked in `sim/tb/video_timing_gen_il_tb.v`). The field after the half-line VSYNC
+is drawn half a line lower, as with CEA-861 480i. The 720p and 480p rasters stay
+progressive and simply show each field (bob, no half-line offset).
+
+Bandwidth: one field per raster field, so an interlaced mode costs exactly what the
+progressive mode of the same width costs: 320-wide fine in RGB565, RGB888 as limited as
+in progressive. A 640-wide interlaced mode is out of reach (147 Mbit/s in RGB565) and is
+cut at the ring's 512 columns anyway.
+
+Sim (`gwline_top_e2e_tb.sv +GM +IL`, stream `gen_gwline_stream.py --groovymame
+--interlace`): an RGB888 320x480i stream passes (no timeout, every ACK right, vCount
+doubled; the same check without `+IL` fails, as it must). The RGB565 interlaced stream
+gives exactly the same numbers as the progressive 320x240 RGB565 stream (both overflow
+the ring when sent unpaced in the 720p bench, a known, pre-existing limit).
+
+HW test to do: bitstream `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs` (VIDEO_MODE 3), an
+interlaced game, no extra option (`-mister_interlaced_fb 1` is the default). Open
+questions: does the HDMI->VGA converter pass a 15 kHz interlaced signal through
+untouched (DVI has no interlace flag; the sink sees only the half-line VSYNC); is the
+field order right on the tube (if the picture "combs" or lines are swapped pairwise, the
+fix is to swap which field gets the half-line VSYNC); no serration/equalising pulses yet.
+
 ## Pacing on Windows and macOS (discussion 2026-10-31, nothing implemented)
 
 `SO_MAX_PACING_RATE` and the fq qdisc are Linux-only.

@@ -14,6 +14,8 @@
 //
 // Plusargs: +DIR=<dir with stream_*.hex>  +LEAD=<lines, default 24>  +GAP=<clk50m cycles
 //           forced between the BLIT header and the first pixel datagram, default 48>
+//           +IL : with +GM, the stream announces an interlaced modeline (gen --interlace):
+//                 each blit is one field, ACK vCount is in frame lines (2 * line + field)
 //           +GM : the stream is GroovyMAME's dialect (gen_gwline_stream.py --groovymame).
 //                 Like drawnogpu.cpp, each frame's datagrams go out back to back at wire
 //                 speed; a raw RGB888 320x240 frame needs ~19 ms on 100 Mbit (more than
@@ -58,7 +60,7 @@ module gwline_top_e2e_tb;
     reg [63:0] sidx   [0:1023];
     integer nframes_eth = 0, nf_net = 0;
     string dir = ".";
-    integer lead = 24, gap_hdr = 48, gm = 0, period = 1;
+    integer lead = 24, gap_hdr = 48, gm = 0, period = 1, il = 0;
 
     task automatic send_byte(input [7:0] b);
         integer k; reg [7:0] v;
@@ -85,6 +87,7 @@ module gwline_top_e2e_tb;
         void'($value$plusargs("LEAD=%d", lead));
         void'($value$plusargs("GAP=%d", gap_hdr));
         if ($test$plusargs("GM")) begin gm = 1; period = 2; end
+        if ($test$plusargs("IL")) il = 1;
         $readmemh({dir, "/stream_bytes.hex"}, sbytes);
         $readmemh({dir, "/stream_idx.hex"}, sidx);
         while (nframes_eth < 1024 && sidx[nframes_eth] !== 64'hx && sidx[nframes_eth][55:32] != 0)
@@ -314,6 +317,9 @@ module gwline_top_e2e_tb;
                     // (720p: output line / 3, 0 = first active line); the header is
                     // sent ~LEAD lines before the raster's top, i.e. in the frame before
                     ak_exp_vc = hdr_parsed_line;
+                    // +IL: interlaced modeline -> vCount in frame lines (2 * line + field;
+                    // the 720p raster stays progressive, field 0)
+                    if (il) begin ak_vc = ak_vc / 2;  if (txb[12][5]) begin ack_err = ack_err + 1; $display("ACK: F1 set on a progressive raster"); end end
                     if (ak_gf != period * (ak_fe - 1)) begin
                         ack_err = ack_err + 1; $display("ACK: blit %0d reports GPU frame %0d, want %0d", ak_fe, ak_gf, period * (ak_fe - 1)); end
                     if (ak_vc < ak_exp_vc - 1 || ak_vc > ak_exp_vc + 1 || ak_vc < 250 - lead - 3 || ak_vc >= 250) begin

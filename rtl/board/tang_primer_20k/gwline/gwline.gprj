@@ -32,6 +32,7 @@
         <File path="../../../vendor/nand2mario_ddr3/uart_tx_V2.v" type="file.verilog" enable="1"/>
         <File path="../../../vendor/gowin/rpll_tmds.v" type="file.verilog" enable="1"/>
         <File path="../../../generic/video/video_timing_gen.v" type="file.verilog" enable="1"/>
+        <File path="../../../generic/video/video_timing_gen_il.v" type="file.verilog" enable="1"/>
         <File path="../video/dvi_tx/dvi_tx.v" type="file.verilog" enable="1"/>
         <!-- top + constraints -->
         <File path="gwline_top.sv" type="file.verilog" enable="1"/>

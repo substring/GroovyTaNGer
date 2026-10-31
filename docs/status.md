@@ -68,12 +68,16 @@ stops answering, button S0 resets it without reflashing.
    converters accept a low pixel clock (~6.7 MHz for 320x240 @ 15 kHz)? If they need the
    ~25 MHz HDMI minimum, replicate pixels horizontally (super-resolution: same line and
    frame rates, the CRT sees no difference). Test on the user's real converter.
-5. **Interlaced modes** still to validate: SWITCHRES `interlace` flag and the BLIT `field`
-   byte are decoded by the parser but not used; the ring and the raster must handle two
-   half-height fields (odd/even lines, half-line offset between fields). Many HDMI->VGA
-   converters reject or deinterlace interlaced input; the analog RGB path (item 10) has no
-   such issue: the CRT gets exactly our syncs (field toggle + half-line VSYNC shift, mirrored
-   in the composite sync), at modest clocks (640x480i ~12-13.5 MHz).
+5. **Interlaced modes**: implemented 2026-10-31, sim-validated, **not HW-tested** (see
+   `docs/groovymame_client.md`, "Interlace"). A blit is one field (GroovyMAME's default
+   `-mister_interlaced_fb 1`); VIDEO_MODE 2/3 generate a real 2:1 raster (263/262-line
+   fields, half-line VSYNC, `video_timing_gen_il.v`); ACK bit 5 = field, vCount in frame
+   lines. Not done: `interlace = 2` (whole frame per blit, needs 2x the bandwidth),
+   serration/equalising pulses, interlace on the 720p/480p rasters (fields are bobbed).
+   Open risk: the HDMI->VGA converter may reject or deinterlace a 15 kHz interlaced
+   signal; the analog RGB path (item 10) has no such issue: the CRT gets exactly our syncs
+   (field toggle + half-line VSYNC shift, mirrored in the composite sync), at modest
+   clocks (640x480i ~12-13.5 MHz).
 6. **Clear the line ring when the stream stops**: if no line arrives for more than N video
    frames (N to define), blank the ring. Today the last ring lap stays on screen: after a
    stream ends the UART shows `GL=0060` = 96 output lines (32 source lines) still valid.
@@ -139,7 +143,9 @@ stops answering, button S0 resets it without reflashing.
 1. **Raster timings + pixel clock from the SWITCHRES modeline** (item 4): the picture is
    shifted because the raster keeps the fixed mode-3 timings; target = modeline porches
    and totals at pclk x N (super-resolution, N so that pclk x N >= ~25 MHz), dynamic PLL.
-2. **Interlace** (item 5): does not work at all with GroovyMAME.
+2. **Interlace** (item 5): did not work at all with GroovyMAME (each blit is one field,
+   the FPGA waited for a whole frame and timed out). Implemented 2026-10-31 in sim;
+   HW test with `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs`.
 3. **Audio crackle in the treble** with GroovyMAME: read `AU=`/`AL=` on the UART (g4ge)
    during a run first; see `docs/groovymame_client.md`.
 4. **Input lag**: to measure (user).

@@ -65,6 +65,10 @@ def main():
     p.add_argument("--rgb565", action="store_true",
                    help="with --groovymame: GroovyMAME patched with -mister_rgb_mode rgb565 "
                         "(patches/groovymame-mister-rgb565.patch): 5-byte INIT, 2-byte pixels")
+    p.add_argument("--interlace", action="store_true",
+                   help="with --groovymame: CMD_SWITCHRES announces 2*height lines interlaced "
+                        "(interlace=1, GroovyMAME's -mister_interlaced_fb 1); each blit is one "
+                        "field of --height lines")
     p.add_argument("--status-burst", dest="status_burst", type=int, default=0,
                    help="CMD_GET_STATUS requests sent back to back after each frame")
     a = p.parse_args()
@@ -78,8 +82,12 @@ def main():
     frames = [(5, build_arp_request()), (0, build_udp_frame(init))]
     if a.groovymame:   # GroovyMAME sends the game's modeline before its first blit
         w, h = a.width, a.height
-        frames.append((8, build_udp_frame(struct.pack("<BdHHHHHHHHB", 3, 6.7,
-                       w, w + 16, w + 48, w + 104, h, h + 3, h + 6, 262, 0))))
+        if a.interlace:   # 480i-style modeline: each blit is ONE field of --height lines
+            frames.append((8, build_udp_frame(struct.pack("<BdHHHHHHHHB", 3, 6.7,
+                           w, w + 16, w + 48, w + 104, 2 * h, 2 * h + 6, 2 * h + 12, 525, 1))))
+        else:
+            frames.append((8, build_udp_frame(struct.pack("<BdHHHHHHHHB", 3, 6.7,
+                           w, w + 16, w + 48, w + 104, h, h + 3, h + 6, 262, 0))))
     k_audio = 0
     if a.beacon:
         frames.append((3, build_udp_frame(bytes([11, 1]))))   # CMD_SET_BEACON, enable
