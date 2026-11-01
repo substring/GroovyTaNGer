@@ -2,7 +2,8 @@
 // Groovy_Tang - line-ring scanout (see groovy_linering.v for the contract).
 //
 // Follows the raster and nothing else: source line = vcount / V_REPL, source column =
-// hcount >> H_SH. There is no clamp against the writer and no re-phasing on network
+// hcount >> H_SH, or with DYN_H = 1, hcount / h_rep for a replicate factor given at run
+// time (any N, from the SWITCHRES modeline; counted, not divided). There is no clamp against the writer and no re-phasing on network
 // events; whether the addressed slot really holds the wanted line is decided per pixel
 // by the slot tag that comes back alongside the data.
 //
@@ -16,11 +17,13 @@ module groovy_linescan #(
     parameter integer DATA_W  = 16,
     parameter integer H_SH    = 2,
     parameter integer V_REPL  = 3,
+    parameter integer DYN_H   = 0,        // 1: horizontal replicate from h_rep (run time)
     parameter [DATA_W-1:0] BAD_COLOR = {DATA_W{1'b0}}
 ) (
     input  wire                 pix_clk,
     input  wire                 pix_rst,
     input  wire [15:0]          hcount,
+    input  wire [3:0]           h_rep,        // DYN_H: output pixels per source pixel (>= 1)
     input  wire [15:0]          vcount,
     input  wire                 de,
     input  wire                 hsync,
@@ -46,7 +49,16 @@ module groovy_linescan #(
                         (V_REPL == 2) ? (vcount >> 1) :
                         (V_REPL == 4) ? (vcount >> 2) :
                                         vcount / V_REPL[15:0];
-    wire [15:0] scol  = hcount >> H_SH;
+    // DYN_H: a column counter that steps every h_rep output pixels and restarts with the
+    // line (hcount == 0). It assumes hcount advances by one per pix_clk, which the free-
+    // running raster guarantees; cur_* are the values FOR the current hcount.
+    reg  [15:0] dc_q;  reg [3:0] dr_q;
+    wire [15:0] dc_cur = (hcount == 16'd0) ? 16'd0 : dc_q;
+    wire [3:0]  dr_cur = (hcount == 16'd0) ? 4'd0  : dr_q;
+    always @(posedge pix_clk)
+        if (dr_cur + 4'd1 >= h_rep) begin dc_q <= dc_cur + 16'd1; dr_q <= 4'd0; end
+        else                        begin dc_q <= dc_cur;         dr_q <= dr_cur + 4'd1; end
+    wire [15:0] scol  = DYN_H ? dc_cur : (hcount >> H_SH);
     assign src_line = sline;
 
     // The host starts each frame some lines BEFORE the raster wraps (it leads), so by

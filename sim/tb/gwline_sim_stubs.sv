@@ -22,11 +22,28 @@ module rpll_tmds #(parameter integer IDIV_SEL = 3, parameter integer FBDIV_SEL =
     initial begin lock = 0; #2000 lock = 1; end
 endmodule
 
+// Divides HCLKIN by 5 for real (the dynamic rPLL below changes HCLKIN at run time):
+// 371.25 MHz -> 74.25 MHz as before for the fixed modes.
 module CLKDIV #(parameter DIV_MODE = "2", parameter GSREN = "false")
                (input wire RESETN, input wire HCLKIN, output wire CLKOUT, input wire CALIB);
-    reg c = 0;
-    always #6.734 c = ~c;           // 74.25 MHz pixel clock (HCLKIN / 5)
+    reg c = 0;  integer k = 0;
+    always @(posedge HCLKIN) begin k = (k == 4) ? 0 : k + 1;  c <= (k < 3); end
     assign CLKOUT = c;
+endmodule
+
+// Dynamic rPLL: CLKOUT = 27 MHz * FBDIV / IDIV from the select inputs (IDSEL = 64 - IDIV,
+// FBDSEL = 64 - FBDIV, rpll_sel_encode.v); like the hardware, LOCK never asserts.
+module rpll_tmds_dyn (input wire clkin, input wire reset, input wire [5:0] idsel,
+                      input wire [5:0] fbdsel, input wire [5:0] odsel,
+                      output wire clkout, output wire lock);
+    reg c = 0;  real half_ns;  integer fb, id;
+    // integers first: a 6-bit select inside a real expression was taken as signed
+    always @(*) begin
+        fb = 64 - {26'd0, fbdsel};  id = 64 - {26'd0, idsel};
+        half_ns = 1000.0 / (27.0 * fb / id) / 2.0;
+    end
+    always begin #(half_ns) c = ~c; end
+    assign clkout = c;  assign lock = 1'b0;
 endmodule
 
 module DVI_TX_Top (

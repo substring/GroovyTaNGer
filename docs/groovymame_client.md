@@ -187,6 +187,48 @@ modes are where pacing matters, on the 15 kHz raster too:
 To check on the hardware: a 256- or 320-wide mode without `-mister_pacing` (expect
 glitches in the lower part of the picture), then with it.
 
+## Raster from the modeline: VIDEO_MODE 4 (2026-11-01, sim only, not HW-tested)
+
+Until now the raster ignored the CMD_SWITCHRES timings (only the active size was used), so
+the picture position could not come from the host. With `VIDEO_MODE 4` the FPGA runs the
+modeline itself, like Groovy_MiSTer: **porches, sync widths, totals and interlace come from
+GroovyMAME's switchres** (so from the user's `switchres.ini` / `crt_range`), and centring
+is done there, not in the FPGA. Bitstream: `gwline_mode4_modeline.fs`.
+
+How (`rtl/core/groovy_modeline_ctl.v`, `gwline_top.sv`):
+
+- **Pixel clock = pclk x N** through the dynamic rPLL (`rpll_tmds_dyn`, HW-proven in
+  `rtl/board/tang_primer_20k/video/`), N = smallest factor with pclk x N >= 25 MHz (the
+  HDMI floor, `superres_factor.v`), coefficients from `groovy_pll_solver`.
+- **h_total is recomputed on the clock really obtained**: the integer rPLL from 27 MHz
+  misses most clocks by up to ~0.8 %, so `h_total = round(htotal x N x achieved / target)`.
+  The line rate, and the refresh rate the game runs at, then match the modeline within one
+  pixel clock per line (sim: 0.001 to 0.04 %, against up to 0.75 % without it). The extra
+  or missing pixel clocks land in the back porch.
+- **Horizontal replicate N is now any integer** (the ring reader counts columns instead of
+  shifting), e.g. 256 px x 5 = 1280.
+- **Seamless when the PLL does not change**: e.g. 320x240p <-> 320x448i at the same pclk
+  only reloads the timing registers at a frame boundary (no reset, the HDMI sink does not
+  resync). A new PLL setting holds the pixel domain in reset for 2.5 ms (the dynamic
+  rPLL's LOCK never asserts, so a fixed settle like `groovy_video_dyn_top`).
+- **The ring is cleared on every CMD_SWITCHRES** (all modes): its lines belong to the old
+  geometry (a wider new mode showed stale columns on the right edge for a field).
+- Boots with the mode-3 raster (240p 15 kHz at 27 MHz) until the first modeline.
+- Syncs are negative (the protocol's modeline has no polarity fields; MiSTer's are
+  negative too).
+
+Sim (`sim/tb/gwline_modeline_tb.sv`, stream `gen_gwline_stream.py --modes ...`): four
+modelines in a row - 320x240p @ 6.7 MHz, 320x448i @ 6.7 MHz (no reset), 384x224p @ 8 MHz
+(new PLL, one reset), 256x224p @ 5.37 MHz (N = 5). For each: N, active width, HSYNC
+position and width, real-time line period, lines per field (263/262 interlaced), active
+lines and VSYNC line all match the modeline; every frame is shown pixel-exact; no wrong
+pixel ever. Gowin build: timing met (+4.2 ns worst setup).
+
+Limits: still the 512-column ring (a 640-wide mode is cut); serration/equalising pulses
+not generated; the converter must accept each new pixel clock (it resyncs on a PLL
+change). Not HW-tested: the dynamic rPLL settings other than 720p/480p (bring-up) have
+never run on the board.
+
 ## Interlace (implemented 2026-10-31, HW-confirmed 2026-11-01)
 
 **HW result (2026-11-01, user):** Sonic 2 (Genesis, 2-player mode) on the 15 kHz CRT through

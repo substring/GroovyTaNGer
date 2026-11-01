@@ -148,8 +148,9 @@ module gwline_top_e2e_tb;
     end
     integer vframe = -1, k, good_total, perfect_frames = 0, wrong_lines = 0;  reg nz = 0, any_good;
     integer good_ever [0:MAXF-1];  initial for (k = 0; k < MAXF; k = k + 1) good_ever[k] = 0;
-    integer bad [0:MAXF-1];  integer good_from [0:MAXF-1];  reg in_line = 0;
-    initial for (k = 0; k < MAXF; k = k + 1) begin bad[k] = 0; good_from[k] = 0; end
+    integer bad [0:MAXF-1];  integer good_from [0:MAXF-1];  reg in_line = 0;  reg torn_ok;
+    integer badnb [0:MAXF-1];   // pixels neither black nor frame k's (a really wrong pixel)
+    initial for (k = 0; k < MAXF; k = k + 1) begin bad[k] = 0; badnb[k] = 0; good_from[k] = 0; end
 
     always @(posedge pclk) begin
         if (dut.frame_start) begin
@@ -169,17 +170,22 @@ module gwline_top_e2e_tb;
             in_line <= 1;
             if (dut.pix565 != 16'h0000) nz = 1;
             for (k = 0; k < nf_net; k = k + 1)
-                if (dut.pix565 !== pix(k, vc3 / 3, hc3 >> 2)) bad[k] = bad[k] + 1;
+                if (dut.pix565 !== pix(k, vc3 / 3, hc3 >> 2)) begin
+                    bad[k] = bad[k] + 1;  if (dut.pix565 != 16'h0000) badnb[k] = badnb[k] + 1;
+                end
         end else if (in_line) begin
             in_line <= 0;
-            any_good = 0;
+            any_good = 0;  torn_ok = 0;
             for (k = 0; k < nf_net; k = k + 1) begin
                 if (bad[k] == 0) begin good_from[k] = good_from[k] + 1; good_ever[k] = good_ever[k] + 1; any_good = 1; end
-                bad[k] = 0;
+                if (badnb[k] == 0) torn_ok = 1;
+                bad[k] = 0;  badnb[k] = 0;
             end
             // a line that is neither some frame's exact line nor black (never written /
-            // late) shows wrong pixels; only counted while frames are being sent
-            if (!any_good && nz && !sender_done && vframe >= 0) wrong_lines = wrong_lines + 1;
+            // late) shows wrong pixels; only counted while frames are being sent. +GM: a
+            // line torn by its slot tag flipping mid-line (part black, part exact) is the
+            // expected look of the raster overtaking the writer, not a wrong line
+            if (!any_good && nz && !(gm && torn_ok) && !sender_done && vframe >= 0) wrong_lines = wrong_lines + 1;
             nz = 0;
         end
     end
@@ -348,9 +354,9 @@ module gwline_top_e2e_tb;
                  n_ack, n_blit_ack, ack_err, wrong_lines);
         for (k = 0; k < nf_net; k = k + 1) $write(" net%0d:%0d", k, good_ever[k]);  $write("\n");
         for (k = 0; k < nf_net; k = k + 1) if (good_ever[k] == 0) wrong_lines = wrong_lines + 1;
-        // gm: the raster overtakes the RGB888 writer mid-frame; the source line it is
-        // writing at that instant is shown half old / half new (3 output lines a frame)
-        if ((gm ? wrong_lines <= 3 * nf_net : perfect_frames == nf_net && wrong_lines == 0) &&
+        // gm: the raster overtakes the RGB888 writer mid-frame; lines are then exact,
+        // black, or torn exact/black - never a wrong pixel
+        if ((gm ? wrong_lines == 0 : perfect_frames == nf_net && wrong_lines == 0) &&
             ack_err == 0 && n_blit_ack == nf_net &&
             dut.frame_cnt == nf_net && dut.to_cnt == 0 && tx_bad == 0 &&
             (n_audio_bursts == 0 || (a_pairs > 0 && a_bad == 0)) &&

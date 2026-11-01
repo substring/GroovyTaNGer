@@ -23,6 +23,8 @@
 #                               L = 2k, R = 2k + 1 (mod 65536), checked by the testbench.
 #                           8 = CMD_SWITCHRES (--groovymame: right after CMD_INIT,
 #                               h_active x v_active = --width x --height)
+#                           9 = CMD_SWITCHRES of a --modes segment (the tb waits for
+#                               the raster to settle after it)
 #                           4 = CMD_GET_STATUS (--status-burst N: N of them after each
 #                               frame's last pixel datagram, back to back)
 #
@@ -32,6 +34,12 @@
 # bytes (B,G,R per pixel, MAME's little-endian ARGB) cut into 1472-byte datagrams with no
 # regard for line boundaries (nogpu_send_mtu). Each pixel's 888 value packs back to the
 # same pix() RGB565 hash, so the testbench check is unchanged.
+#
+# --modes "pclk_mhz,ha,hb,he,ht,va,vb,ve,vt,il;..." (for sim/tb/gwline_modeline_tb.sv):
+# GroovyMAME dialect in RGB565 (5-byte INIT), one CMD_SWITCHRES per segment followed by
+# --frames frames; a frame of an interlaced segment (il != 0) is one FIELD of va/2 lines.
+# Pixel datagrams hold --lines-per-dgram whole lines so the bench can pace them at the
+# raster's line rate. Frame numbers (and pix()'s f) run on across segments.
 import argparse, os, struct
 import zlib
 from gen_gwline_frames import (build_udp_frame, cmd_init, cmd_blit_field_vsync,
@@ -71,8 +79,11 @@ def main():
                         "field of --height lines")
     p.add_argument("--status-burst", dest="status_burst", type=int, default=0,
                    help="CMD_GET_STATUS requests sent back to back after each frame")
+    p.add_argument("--modes", default="")
     a = p.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
+    if a.modes:
+        return modes_stream(a)
 
     rate = 3 if a.audio else 0
     if a.groovymame:
@@ -130,6 +141,35 @@ def main():
             off += len(data)
     print(f"{len(frames)} ethernet frames, {off} bytes, {a.frames} network frames "
           f"of {a.width}x{a.height}")
+
+def write_stream(outdir, frames):
+    off = 0
+    with open(os.path.join(outdir, "stream_bytes.hex"), "w") as fb, \
+         open(os.path.join(outdir, "stream_idx.hex"), "w") as fi:
+        for kind, data in frames:
+            fi.write(f"{(kind << 56) | (len(data) << 32) | off:016x}\n")
+            fb.write("".join(f"{b:02x}\n" for b in data))
+            off += len(data)
+    return off
+
+def modes_stream(a):
+    frames = [(5, build_arp_request()), (0, build_udp_frame(bytes([2, 0, 0, 2, 2])))]
+    f = 0
+    for seg in a.modes.split(";"):
+        v = seg.split(",")
+        pclk = float(v[0]);  ha, hb, he, ht, va, vb, ve, vt, il = (int(x) for x in v[1:])
+        frames.append((9, build_udp_frame(struct.pack("<BdHHHHHHHHB", 3, pclk,
+                       ha, hb, he, ht, va, vb, ve, vt, il))))
+        h = va // 2 if il else va
+        for _ in range(a.frames):
+            f += 1
+            frames.append((1, build_udp_frame(struct.pack("<BIHI", 6, f, 0, 0))))
+            for l0 in range(0, h, a.lines_per_dgram):
+                frames.append((2, build_udp_frame(b"".join(
+                    struct.pack("<H", pix(f - 1, l, c))
+                    for l in range(l0, min(l0 + a.lines_per_dgram, h)) for c in range(ha)))))
+    off = write_stream(a.outdir, frames)
+    print(f"{len(frames)} ethernet frames, {off} bytes, {f} network frames, modes {a.modes}")
 
 if __name__ == "__main__":
     main()

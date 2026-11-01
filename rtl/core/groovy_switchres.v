@@ -46,6 +46,7 @@ module groovy_switchres (
     output reg  [7:0]  odiv,
     output reg  [3:0]  superres_n,     // horizontal super-res factor used
     output reg  [31:0] achieved_khz,
+    output wire [31:0] target_khz,     // wanted pixel clock = pclk * superres_n
     output reg         ok
 );
     // ---- compute chain (combinational on the held sr_pclk) ----
@@ -81,6 +82,7 @@ module groovy_switchres (
     reg [31:0] l_pclk, l_pout;
     reg [3:0]  l_n;
     reg [15:0] l_ht, l_vt;
+    assign target_khz = l_pout;
     always @(posedge clk_slow) begin
         result_valid <= 1'b0;
         if (rst) begin

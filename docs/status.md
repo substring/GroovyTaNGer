@@ -62,7 +62,10 @@ stops answering, button S0 resets it without reflashing.
    including the frame-delay constraint (fd >= ~8.9 for a 262-line mode).
 3. **Isolated short frames**: ~1 frame in 2000-3600 with a few lines missing mid-stream
    (invisible; likely one lost pixel datagram). Not investigated.
-4. **Toward a 15 kHz CRT** (user, 2026-10-24): the output is 720p today. Native modes need
+4. **Toward a 15 kHz CRT** (user, 2026-10-24). **2026-11-01: VIDEO_MODE 4 runs the
+   CMD_SWITCHRES modeline itself (porches, syncs, totals, interlace, pclk x N via the
+   dynamic rPLL), sim-validated, not HW-tested** - see `docs/groovymame_client.md`. History:
+   the output is 720p today. Native modes need
    the dynamic geometry on gwline (CMD_SWITCHRES -> modeline + PLL; `groovy_switchres`,
    `groovy_pll_solver`, `superres_factor.v` exist). Open question: do the HDMI->VGA
    converters accept a low pixel clock (~6.7 MHz for 320x240 @ 15 kHz)? If they need the
@@ -144,6 +147,8 @@ stops answering, button S0 resets it without reflashing.
 1. **Raster timings + pixel clock from the SWITCHRES modeline** (item 4): the picture is
    shifted because the raster keeps the fixed mode-3 timings; target = modeline porches
    and totals at pclk x N (super-resolution, N so that pclk x N >= ~25 MHz), dynamic PLL.
+   Done in sim 2026-11-01 (VIDEO_MODE 4, `gwline_mode4_modeline.fs`): HW test = the user's
+   `switchres.ini` should now centre the picture.
 2. **Interlace** (item 5): did not work at all with GroovyMAME (each blit is one field,
    the FPGA waited for a whole frame and timed out). Implemented 2026-10-31 in sim;
    HW-confirmed 2026-11-01 with `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs` (Sonic 2, 320x448i).

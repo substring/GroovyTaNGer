@@ -20,6 +20,8 @@
 //
 // `interlace` is sampled at the end of each field, so the raster switches between
 // progressive and interlaced only on a field boundary, always starting with the top field.
+// The modeline inputs may change at run time; the caller should change them at a frame
+// boundary (gwline loads them on frame_start).
 `default_nettype none
 
 module video_timing_gen_il (
@@ -52,11 +54,20 @@ module video_timing_gen_il (
 );
     reg        il;                     // interlace, as latched for the current field
     wire       half_v = il && !field;  // top field: one more line, half-line VSYNC
-    wire [15:0] vt    = half_v ? (v_total + 16'd1) : v_total;
     wire [15:0] h_mid = {1'b0, h_total[15:1]};
 
-    wire last_h = (hcount == h_total - 16'd1);
-    wire last_v = (vcount == vt - 16'd1);
+    // The wrap thresholds are REGISTERED (they only change with the modeline or at a
+    // field boundary, where vcount is 0 and far from them): computing field -> +1 -> -1
+    // -> compare every cycle was the critical path at pix_clk (VIDEO_MODE 4 build).
+    // >= rather than ==: the modeline may be reloaded at run time (gwline VIDEO_MODE 4),
+    // and a counter already past a smaller new total must wrap, not run to 65535.
+    reg  [15:0] h_lim, v_lim;
+    always @(posedge clk) begin
+        h_lim <= h_total - 16'd1;
+        v_lim <= half_v ? v_total : (v_total - 16'd1);
+    end
+    wire last_h = (hcount >= h_lim);
+    wire last_v = (vcount >= v_lim);
 
     always @(posedge clk) begin
         if (rst) begin

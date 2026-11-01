@@ -26,7 +26,11 @@
 `include "rmii.svh"
 `default_nettype none
 
-module gwline_top (
+module gwline_top #(
+    // see "geometry" below; a parameter so the benches can pick it (Gowin builds use
+    // the default: edit it here, as before)
+    parameter integer VIDEO_MODE = 0
+) (
     input  wire        clk,          // 27 MHz, H11
     input  wire        rst,          // active-low button, T10
     rmii               netrmii,
@@ -64,16 +68,20 @@ module gwline_top (
     //   shown like a progressive frame of vactive/2 lines. In VIDEO_MODE 2/3 the raster
     //   itself becomes 2:1 interlaced (fields of 263/262 lines, half-line VSYNC, see
     //   video_timing_gen_il.v); the 720p/480p modes stay progressive (each field bobbed).
-    localparam integer VIDEO_MODE = 0;
+    // VIDEO_MODE 4: the raster FOLLOWS THE CMD_SWITCHRES MODELINE (porches, syncs, totals,
+    //   interlace) at pclk x N through the dynamic rPLL (groovy_modeline_ctl.v), so the
+    //   picture position comes from the host's switchres.ini like on MiSTer. Boots with the
+    //   mode-3 raster until the first modeline.
+    localparam DYN = (VIDEO_MODE == 4);
     localparam [15:0] SRC_W = 16'd320, SRC_H = 16'd240;
-    localparam [15:0] OUT_W = (VIDEO_MODE == 3) ? 16'd1280 : (VIDEO_MODE == 2) ? 16'd320 : (VIDEO_MODE == 1) ? 16'd640 : 16'd1280;
+    localparam [15:0] OUT_W = (VIDEO_MODE >= 3) ? 16'd1280 : (VIDEO_MODE == 2) ? 16'd320 : (VIDEO_MODE == 1) ? 16'd640 : 16'd1280;
     localparam [15:0] OUT_H = (VIDEO_MODE >= 2) ? 16'd240 : (VIDEO_MODE == 1) ? 16'd480 : 16'd720;
-    localparam integer HREP = (VIDEO_MODE == 3) ? 4 : (VIDEO_MODE == 2) ? 1 : (VIDEO_MODE == 1) ? 2 : 4;
+    localparam integer HREP = (VIDEO_MODE >= 3) ? 4 : (VIDEO_MODE == 2) ? 1 : (VIDEO_MODE == 1) ? 2 : 4;
     localparam integer VREP = (VIDEO_MODE >= 2) ? 1 : (VIDEO_MODE == 1) ? 2 : 3;
-    localparam integer HSH  = (VIDEO_MODE == 3) ? 2 : (VIDEO_MODE == 2) ? 0 : (VIDEO_MODE == 1) ? 1 : 2;
-    localparam [15:0] H_TOTAL = (VIDEO_MODE == 3) ? 16'd1716 : (VIDEO_MODE == 2) ? 16'd429 : (VIDEO_MODE == 1) ? 16'd800 : 16'd1650;
-    localparam [15:0] H_SYNC0 = (VIDEO_MODE == 3) ? 16'd1360 : (VIDEO_MODE == 2) ? 16'd340 : (VIDEO_MODE == 1) ? 16'd656 : 16'd1390;
-    localparam [15:0] H_SYNC1 = (VIDEO_MODE == 3) ? 16'd1488 : (VIDEO_MODE == 2) ? 16'd372 : (VIDEO_MODE == 1) ? 16'd752 : 16'd1430;
+    localparam integer HSH  = (VIDEO_MODE >= 3) ? 2 : (VIDEO_MODE == 2) ? 0 : (VIDEO_MODE == 1) ? 1 : 2;
+    localparam [15:0] H_TOTAL = (VIDEO_MODE >= 3) ? 16'd1716 : (VIDEO_MODE == 2) ? 16'd429 : (VIDEO_MODE == 1) ? 16'd800 : 16'd1650;
+    localparam [15:0] H_SYNC0 = (VIDEO_MODE >= 3) ? 16'd1360 : (VIDEO_MODE == 2) ? 16'd340 : (VIDEO_MODE == 1) ? 16'd656 : 16'd1390;
+    localparam [15:0] H_SYNC1 = (VIDEO_MODE >= 3) ? 16'd1488 : (VIDEO_MODE == 2) ? 16'd372 : (VIDEO_MODE == 1) ? 16'd752 : 16'd1430;
     localparam [15:0] V_TOTAL = (VIDEO_MODE >= 2) ? 16'd262 : (VIDEO_MODE == 1) ? 16'd525 : 16'd750;
     localparam [15:0] V_SYNC0 = (VIDEO_MODE >= 2) ? 16'd243 : (VIDEO_MODE == 1) ? 16'd490 : 16'd725;
     localparam [15:0] V_SYNC1 = (VIDEO_MODE >= 2) ? 16'd246 : (VIDEO_MODE == 1) ? 16'd492 : 16'd730;
@@ -220,13 +228,17 @@ module gwline_top (
         .out_ready(ft_ready), .busy(ft_busy)
     );
     wire        sr_v, sr_l, sr_rdy;  wire [7:0] sr_d;
+    wire        sr_res_valid, sr_res_ok;  wire [6:0] sr_res_idiv, sr_res_fbdiv;
+    wire [7:0]  sr_res_odiv;  wire [3:0] sr_res_n;  wire [31:0] sr_res_ach, sr_res_tgt;
     groovy_switchres u_switchres (
         .clk(clk50m), .clk_slow(clk1m), .rst(core_rst),
         .switchres_valid(switchres_valid), .sr_pclk(sr_pclk),
         .sr_h_total(sr_ht), .sr_v_total(sr_vt),
         .send(get_switchres_valid),
         .out_valid(sr_v), .out_data(sr_d), .out_last(sr_l), .out_ready(sr_rdy), .busy(),
-        .result_valid(), .idiv(), .fbdiv(), .odiv(), .superres_n(), .achieved_khz(), .ok()
+        .result_valid(sr_res_valid), .idiv(sr_res_idiv), .fbdiv(sr_res_fbdiv),
+        .odiv(sr_res_odiv), .superres_n(sr_res_n), .achieved_khz(sr_res_ach),
+        .target_khz(sr_res_tgt), .ok(sr_res_ok)
     );
     localparam DEBUG_FIXED_DEST = 1'b0;
     wire [31:0] dst_ip   = DEBUG_FIXED_DEST ? {8'd192,8'd168,8'd15,8'd15} : req_ip;
@@ -254,7 +266,10 @@ module gwline_top (
     // does NOT clear the ring's actual BRAM cells (no bulk-write path for that yet) but
     // DOES reset slot_line to the FFFF sentinel, so SL=FFFF unambiguously means "not
     // rewritten since the last CMD_INIT" even if the physical BRAM cell still has old data.
-    wire video_rst = core_rst | init_valid;
+    // also on CMD_SWITCHRES: the ring's lines belong to the old geometry (another width
+    // leaves stale columns at the right edge, seen in sim/tb/gwline_modeline_tb.sv);
+    // GroovyMAME sends the modeline right before the next blit, so nothing is lost
+    wire video_rst = core_rst | init_valid | switchres_valid;
 
     // ---- BLIT pixel accumulator (clk50m) ----
     wire                  fb_we, frame_done;
@@ -308,14 +323,56 @@ module gwline_top (
     // PIXEL CLOCK (720p) - the only PLL now (no DDR3 clocks)
     // =========================================================================
     wire serial_clk, tmds_lock, pix_clk;
-    rpll_tmds #(.IDIV_SEL ((VIDEO_MODE == 3) ? 0 : (VIDEO_MODE == 2) ? 3  : (VIDEO_MODE == 1) ? 2  : 3),
-                .FBDIV_SEL((VIDEO_MODE == 3) ? 4 : (VIDEO_MODE == 2) ? 4  : (VIDEO_MODE == 1) ? 13 : 54),
-                .ODIV_SEL ((VIDEO_MODE == 3) ? 4 : (VIDEO_MODE == 2) ? 16 : (VIDEO_MODE == 1) ? 8  : 2))
+    // VIDEO_MODE 4: the modeline raster (rtl/core/groovy_modeline_ctl.v) and its rPLL
+    wire        ml_apply_tgl, ml_pll_hold, ml_il, ml_err;
+    wire [15:0] ml_htot, ml_hact, ml_hsb, ml_hse, ml_vtot, ml_vact, ml_vsb, ml_vse;
+    wire [3:0]  ml_rep;  wire [6:0] ml_idiv, ml_fbdiv;  wire [7:0] ml_odiv, ml_napplied, ml_npll;
+    logic       px_applied_tgl;
+    wire hdmi_rst_n;
+    generate if (DYN) begin : g_dynpll
+        // the controller runs on the button reset (synchronised), not on the network's
+        // ready: the raster must come up with or without a host, as in the other modes
+        logic [1:0] rst_s;
+        always_ff @(posedge clk50m or negedge rst)
+            if (!rst) rst_s <= 2'b00; else rst_s <= {rst_s[0], 1'b1};
+        groovy_modeline_ctl u_mlctl (
+            .clk(clk50m), .rst(~rst_s[1]),
+            .switchres_valid(switchres_valid),
+            .sr_ha(sr_ha), .sr_hb(sr_hb), .sr_he(sr_he), .sr_ht(sr_ht),
+            .sr_va(sr_va), .sr_vb(sr_vb), .sr_ve(sr_ve), .sr_vt(sr_vt), .sr_il(sr_il),
+            .clk_slow(clk1m), .sol_valid(sr_res_valid), .sol_ok(sr_res_ok),
+            .sol_idiv(sr_res_idiv), .sol_fbdiv(sr_res_fbdiv), .sol_odiv(sr_res_odiv),
+            .sol_n(sr_res_n), .sol_ach_khz(sr_res_ach), .sol_tgt_khz(sr_res_tgt),
+            .apply_tgl(ml_apply_tgl), .applied_tgl(px_applied_tgl), .pll_hold(ml_pll_hold),
+            .m_htot(ml_htot), .m_hact(ml_hact), .m_hsb(ml_hsb), .m_hse(ml_hse),
+            .m_vtot(ml_vtot), .m_vact(ml_vact), .m_vsb(ml_vsb), .m_vse(ml_vse),
+            .m_il(ml_il), .m_rep(ml_rep),
+            .m_idiv(ml_idiv), .m_fbdiv(ml_fbdiv), .m_odiv(ml_odiv),
+            .err(ml_err), .n_applied(ml_napplied), .n_pll(ml_npll));
+        wire [5:0] idsel, fbdsel, odsel;
+        rpll_sel_encode u_enc (.idiv(ml_idiv), .fbdiv(ml_fbdiv), .odiv(ml_odiv),
+                               .idsel(idsel), .fbdsel(fbdsel), .odsel(odsel));
+        // dynamic rPLL: its LOCK never asserts (video/README.md), so the pixel domain is
+        // released by the controller's fixed settle delay instead
+        rpll_tmds_dyn u_tmdspll (.clkin(clk), .reset(~rst), .idsel(idsel), .fbdsel(fbdsel),
+                                 .odsel(odsel), .clkout(serial_clk), .lock(tmds_lock));
+        assign hdmi_rst_n = rst & ~ml_pll_hold;
+        CLKDIV u_div (.RESETN(rst), .HCLKIN(serial_clk), .CLKOUT(pix_clk), .CALIB(1'b1));
+        defparam u_div.DIV_MODE = "5";
+        defparam u_div.GSREN    = "false";
+    end else begin : g_fixpll
+        assign {ml_apply_tgl, ml_pll_hold, ml_il, ml_err} = 4'b0;
+        assign {ml_htot, ml_hact, ml_hsb, ml_hse, ml_vtot, ml_vact, ml_vsb, ml_vse} = '0;
+        assign {ml_rep, ml_idiv, ml_fbdiv, ml_odiv, ml_napplied, ml_npll} = '0;
+    rpll_tmds #(.IDIV_SEL ((VIDEO_MODE >= 3) ? 0 : (VIDEO_MODE == 2) ? 3  : (VIDEO_MODE == 1) ? 2  : 3),
+                .FBDIV_SEL((VIDEO_MODE >= 3) ? 4 : (VIDEO_MODE == 2) ? 4  : (VIDEO_MODE == 1) ? 13 : 54),
+                .ODIV_SEL ((VIDEO_MODE >= 3) ? 4 : (VIDEO_MODE == 2) ? 16 : (VIDEO_MODE == 1) ? 8  : 2))
         u_tmdspll (.clkin(clk), .clkout(serial_clk), .lock(tmds_lock));
-    wire hdmi_rst_n = rst & tmds_lock;
+    assign hdmi_rst_n = rst & tmds_lock;
     CLKDIV u_div (.RESETN(hdmi_rst_n), .HCLKIN(serial_clk), .CLKOUT(pix_clk), .CALIB(1'b1));
     defparam u_div.DIV_MODE = "5";
     defparam u_div.GSREN    = "false";
+    end endgenerate
 
     // =========================================================================
     // 720p timing - FREE-RUNNING. The raster is the system's master clock: it never
@@ -328,10 +385,28 @@ module gwline_top (
     wire [15:0] hcount, vcount;
     logic [1:0] il_pix;
     always_ff @(posedge pix_clk) il_pix <= {il_pix[0], src_il && (VIDEO_MODE >= 2)};
+
+    // VIDEO_MODE 4: the raster registers, in the pixel domain. Loaded from the
+    // controller's shadows while the domain is held in reset (PLL change) and at a
+    // frame_start once the controller has toggled ml_apply_tgl (seamless change).
+    logic [15:0] r_htot = H_TOTAL, r_hact = OUT_W, r_hsb = H_SYNC0, r_hse = H_SYNC1;
+    logic [15:0] r_vtot = V_TOTAL, r_vact = OUT_H, r_vsb = V_SYNC0, r_vse = V_SYNC1;
+    logic        r_il = 1'b0;  logic [3:0] r_rep = HREP;
+    logic [1:0]  apl_s;
+    always_ff @(posedge pix_clk) apl_s <= {apl_s[0], ml_apply_tgl};
+    always_ff @(posedge pix_clk)
+        if (DYN && (!hdmi_rst_n || (frame_start && apl_s[1] != px_applied_tgl))) begin
+            r_htot <= ml_htot;  r_hact <= ml_hact;  r_hsb <= ml_hsb;  r_hse <= ml_hse;
+            r_vtot <= ml_vtot;  r_vact <= ml_vact;  r_vsb <= ml_vsb;  r_vse <= ml_vse;
+            r_il   <= ml_il;    r_rep  <= ml_rep;
+            px_applied_tgl <= apl_s[1];
+        end
     video_timing_gen_il u_timing (
-        .clk(pix_clk), .rst(~hdmi_rst_n), .en(1'b1), .interlace(il_pix[1]),
-        .h_total(H_TOTAL), .h_active(OUT_W), .h_sync_begin(H_SYNC0), .h_sync_end(H_SYNC1),
-        .v_total(V_TOTAL), .v_active(OUT_H), .v_sync_begin(V_SYNC0), .v_sync_end(V_SYNC1),
+        .clk(pix_clk), .rst(~hdmi_rst_n), .en(1'b1), .interlace(DYN ? r_il : il_pix[1]),
+        .h_total(DYN ? r_htot : H_TOTAL), .h_active(DYN ? r_hact : OUT_W),
+        .h_sync_begin(DYN ? r_hsb : H_SYNC0), .h_sync_end(DYN ? r_hse : H_SYNC1),
+        .v_total(DYN ? r_vtot : V_TOTAL), .v_active(DYN ? r_vact : OUT_H),
+        .v_sync_begin(DYN ? r_vsb : V_SYNC0), .v_sync_end(DYN ? r_vse : V_SYNC1),
         .h_sync_pos(SYNC_POS), .v_sync_pos(SYNC_POS),
         .hcount(hcount), .vcount(vcount),
         .hsync(hsync), .vsync(vsync), .de(de),
@@ -339,19 +414,20 @@ module gwline_top (
 
     // =========================================================================
     // LINE RING: blit_rx pixels in (clk50m), raster pixels out (pix_clk).
-    // video_rst (reset or CMD_INIT) restarts the writer and re-clears every slot tag,
+    // video_rst (reset, CMD_INIT or CMD_SWITCHRES) restarts the writer and re-clears every slot tag,
     // so a new session can never show a previous session's lines.
     // =========================================================================
     wire [15:0] write_line, src_line_wr, lead_top;
     wire [9:0]  good_lines;
     wire [15:0] pix565;  wire de_o, hs_o, vs_o;
     groovy_linering #(.NLINES(NLINES), .LINE_W(LINE_W), .DATA_W(16),
-                      .H_SH(HSH), .V_REPL(VREP), .BAD_COLOR(16'h0000)) u_linering (
+                      .H_SH(HSH), .V_REPL(VREP), .DYN_H(DYN ? 1 : 0),
+                      .BAD_COLOR(16'h0000)) u_linering (
         .wr_clk(clk50m), .wr_rst(video_rst), .frame_start(blit_valid),
         .px_we(fb_we), .px_data(fb_wdata), .native_w(src_w),
         .write_line(write_line), .src_line_wr(src_line_wr), .lead_top(lead_top),
         .pix_clk(pix_clk), .pix_rst(~hdmi_rst_n),
-        .hcount(hcount), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
+        .hcount(hcount), .h_rep(r_rep), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
         .vframe_start(frame_start),
         .pix(pix565), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o),
         .good_lines(good_lines));
@@ -377,7 +453,7 @@ module gwline_top (
         if (gl_s1 == gl_s2) gl_50 <= gl_s2;
     end
     // every output line the source covers was valid in the last video frame
-    wire [15:0] src_out_h = (src_h * VREP > OUT_H) ? OUT_H : src_h * VREP;
+    wire [15:0] src_out_h = DYN ? src_h : (src_h * VREP > OUT_H) ? OUT_H : src_h * VREP;
     wire picture_ok = (gl_50 == src_out_h[9:0]);
     // Beacon status bit0: picture NOT complete; bit6: audio playing.
     assign beamrace_status = {1'b0, a_playing, 5'd0, ~picture_ok};

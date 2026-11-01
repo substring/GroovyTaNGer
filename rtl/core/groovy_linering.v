@@ -42,6 +42,7 @@ module groovy_linering #(
     parameter integer DATA_W    = 16,
     parameter integer H_SH      = 2,           // log2(horizontal replicate)
     parameter integer V_REPL    = 3,           // vertical replicate
+    parameter integer DYN_H     = 0,           // 1: horizontal replicate = h_rep input
     parameter [DATA_W-1:0] BAD_COLOR = {DATA_W{1'b0}}   // shown for a line not in the ring
 ) (
     // ---------------- write side (network clock) ----------------
@@ -59,6 +60,7 @@ module groovy_linering #(
     input  wire                pix_clk,
     input  wire                pix_rst,
     input  wire [15:0]         hcount,
+    input  wire [3:0]          h_rep,         // DYN_H only (tie to 1 otherwise)
     input  wire [15:0]         vcount,
     input  wire                de,
     input  wire                hsync,
@@ -113,9 +115,9 @@ module groovy_linering #(
     // ---- reader ----
     wire [15:0] src_line;
     groovy_linescan #(.LNSEL_W(LNSEL_W), .COL_W(COL_W), .DATA_W(DATA_W),
-                      .H_SH(H_SH), .V_REPL(V_REPL), .BAD_COLOR(BAD_COLOR)) u_scan (
+                      .H_SH(H_SH), .V_REPL(V_REPL), .DYN_H(DYN_H), .BAD_COLOR(BAD_COLOR)) u_scan (
         .pix_clk(pix_clk), .pix_rst(pix_rst),
-        .hcount(hcount), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
+        .hcount(hcount), .h_rep(h_rep), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
         .vframe_start(vframe_start), .frame_base(base_p2),
         .r_slot(r_slot), .r_col(r_col), .r_data(r_data), .r_tag(r_tag),
         .pix(pix), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o),
