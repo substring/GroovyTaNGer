@@ -5,7 +5,7 @@ What it takes to run the real GroovyMAME client (`-video mister`, its own nogpu 
 Primer 20K Dock's 100 Mbit Ethernet. Protocol conformance itself is in
 `docs/protocol_conformance_2026-10.md`.
 
-## Setup recap: the three "hacks" that make it work (2026-10-30, HW-confirmed on the CRT)
+## Setup recap: the "hacks" that make it work (2026-10-30, HW-confirmed on the CRT; 4 and 5 added 2026-11-01)
 
 Everything below is needed together; each one is explained further down.
 
@@ -23,10 +23,16 @@ Everything below is needed together; each one is explained further down.
    `<interface>`: `eno1` on g4ge, `enp6s0` on the 5800X. `flow_limit 1000` is mandatory
    (the default 100 drops the tail of every frame). Back to normal:
    `tc qdisc replace dev <interface> root fq_codel`.
+4. **`-aspect 4:3`** on GroovyMAME's command line: otherwise switchres takes the PC
+   desktop's aspect (16:10 here) for the CRT's and widens every mode by 1.2 (a 320-px game
+   in a 384-px mode, black bars each side). See "Raster from the modeline".
+5. **The user's own `-monitor custom -crt_range0 ...`** (or `-switchres_ini 1` with a
+   `switchres.ini` in the current directory; it is NOT read by default): the FPGA
+   (VIDEO_MODE 4) now runs the modeline as is, so the CRT geometry comes from there.
 
 Plus, on the FPGA side, a bitstream with the conformance fixes (commit 0f317be or later;
-`GET_STATUS` status bit 6 = 1 proves it) and, for the CRT, VIDEO_MODE 3
-(`impl/variants/gwline_mode3_240p_15k_x4_27mhz_gm.fs`). And the PC's address on the
+`GET_STATUS` status bit 6 = 1 proves it) and, for the CRT, VIDEO_MODE 4
+(`impl/variants/gwline_mode4_modeline.fs`; before 2026-11-01: VIDEO_MODE 3). And the PC's address on the
 board's subnet (`ip addr add 192.168.15.15/24 dev <interface>`, root).
 
 Constraint to remember: GroovyMAME's frame delay must stay >= ~8.9 (262-line modes) for
@@ -199,6 +205,17 @@ the line is active. GroovyMAME was not using the user's own crt_range (options
 `tools/gm_test_sender.py --host 192.168.15.14 srresult`: pclk 7804 kHz x4 = 31216 kHz,
 rPLL idiv 9 / fbdiv 52 / odiv 4 -> 31200 kHz (0.05 %), h_total 1995 for 1996: correct.
 First HW run of the dynamic rPLL outside 720p/480p.
+
+**The real cause of the narrow picture: `-aspect 4:3` is needed.** With `-video mister`,
+GroovyMAME still gives switchres the PC DESKTOP's aspect as the monitor aspect
+(`switchres_module.cpp:243`, `monitor->aspect()`); on a 16:10 desktop switchres widens
+every mode by `monitor_aspect / (4/3)` = 1.2 (`3rdparty/switchres/modeline.cpp:172`,
+`aspect_corrector`): the game asks 320x224, switchres builds 384x224 at scale 1.0, and the
+320-px picture sits in the middle of a 384-px mode with 32 black pixels each side. With
+`-aspect 4:3`: `get_mode(0) 320 240 60 1.333333`, modeline `320x224 6.725 MHz 320 352 383
+430 224 232 235 261` (user's crt_range). This is HACK no. 4 of the setup (see the recap
+at the top). Proper fix for the fork: ignore the desktop aspect for `-video mister` (the
+real screen is the CRT behind the FPGA).
 
 
 Until now the raster ignored the CMD_SWITCHRES timings (only the active size was used), so
