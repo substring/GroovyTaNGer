@@ -142,7 +142,37 @@ stops answering, button S0 resets it without reflashing.
    board over the UART before using them. These pins sit on the DDR3's 1.5 V bank: declare them
    LVCMOS15. Needs a ~10 ms debounce. Later: a small OSD menu driven by the buttons.
 
-## Next session (from the first GroovyMAME run on the CRT, 2026-10-30)
+## Priorities (user, 2026-11-01) - START HERE
+
+**P1**
+1. **Clear the buffer on CMD_CLOSE**: today `video_rst` = reset | CMD_INIT | CMD_SWITCHRES
+   (`gwline_top.sv`); CMD_CLOSE does not clear the ring, so the last lines stay on screen
+   after GroovyMAME quits. Add `close_valid` (and see item 6: blank after N frames
+   without a stream).
+2. **Our screensaver** (item 7: GroovyArcade logo when no stream is coming), after the
+   ring is blanked.
+3. **Games native 640x480@60, which will necessarily be 480i here** (15 kHz CRT): to
+   test. Known limits before trying: a 640-px line is cut at the ring's 512 columns
+   (`LINE_W`), and one 640x240 field in RGB565 at 15.7 kHz needs ~161 Mbit/s, more than
+   the 100 Mbit link (needs QOI, item "Compression", or a narrower width). Check what
+   switchres picks (`-v | grep Modeline`).
+4. **Regroup the GroovyMAME patches** (or make a single one): today
+   `patches/groovymame-mister-rgb565.patch` + `groovymame-mister-pacing.patch` (raise
+   fix folded in) + `groovymame-mister-pacing-raise-fix.patch` (incremental, for the
+   already patched fork). Options: one combined patch, or a branch in the user's fork.
+   Also candidate for it: ignore the desktop aspect for `-video mister` (the `-aspect 4:3`
+   hack, `docs/groovymame_client.md`).
+
+**P2**
+5. **OSD with the Dock buttons** (items 13 and 14: information overlay, buttons, OSD).
+6. **LEDs for diagnostics, including the RGB LED** (Dock LEDs are scrambled, see memory
+   `tang-led-mapping`; the RGB LED pins to find on the Dock schematic).
+7. **"Bug": without `-skip_gameinfo`, MAME's first screen** (the game info screen) should
+   be at 31 kHz but shows a picture with a strange scan. Not investigated. Leads: the
+   modeline sent (`-v`), VIDEO_MODE 4 then really outputs 31 kHz (pclk x N, a 640-px
+   mode is cut at 512 columns), whether the CRT / converter accepts 31 kHz at all.
+
+
 
 1. **Raster timings + pixel clock from the SWITCHRES modeline** (item 4): the picture is
    shifted because the raster keeps the fixed mode-3 timings; target = modeline porches
