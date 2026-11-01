@@ -187,7 +187,19 @@ modes are where pacing matters, on the 15 kHz raster too:
 To check on the hardware: a 256- or 320-wide mode without `-mister_pacing` (expect
 glitches in the lower part of the picture), then with it.
 
-## Raster from the modeline: VIDEO_MODE 4 (2026-11-01, sim only, not HW-tested)
+## Raster from the modeline: VIDEO_MODE 4 (2026-11-01, HW: works)
+
+**HW (2026-11-01, user):** works, better than the fixed raster ("ça marche mieux"), but the
+porches look very large. Measured: they are exactly GroovyMAME's modeline, not ours. Its
+`-v` log: `384x240_60 15.66 kHz 7.83 MHz 384 400 437 500 240 242 245 261` (and 384x448i
+`... 448 467 473 523 interlace`), i.e. front porch 2.04 us, sync 4.73 us, back porch
+8.05 us = switchres' default `arcade_15` crt_range (2.000, 4.700, 8.000): only 77 % of
+the line is active. GroovyMAME was not using the user's own crt_range (options
+`monitor` / `crt_range0` in its own ini or on the command line). FPGA side, read with
+`tools/gm_test_sender.py --host 192.168.15.14 srresult`: pclk 7804 kHz x4 = 31216 kHz,
+rPLL idiv 9 / fbdiv 52 / odiv 4 -> 31200 kHz (0.05 %), h_total 1995 for 1996: correct.
+First HW run of the dynamic rPLL outside 720p/480p.
+
 
 Until now the raster ignored the CMD_SWITCHRES timings (only the active size was used), so
 the picture position could not come from the host. With `VIDEO_MODE 4` the FPGA runs the

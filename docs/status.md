@@ -147,8 +147,9 @@ stops answering, button S0 resets it without reflashing.
 1. **Raster timings + pixel clock from the SWITCHRES modeline** (item 4): the picture is
    shifted because the raster keeps the fixed mode-3 timings; target = modeline porches
    and totals at pclk x N (super-resolution, N so that pclk x N >= ~25 MHz), dynamic PLL.
-   Done in sim 2026-11-01 (VIDEO_MODE 4, `gwline_mode4_modeline.fs`): HW test = the user's
-   `switchres.ini` should now centre the picture.
+   Done 2026-11-01 (VIDEO_MODE 4, `gwline_mode4_modeline.fs`), **works on HW**; large
+   porches = GroovyMAME's default `arcade_15` crt_range, the user's own crt_range must be
+   given to GroovyMAME (`monitor` / `crt_range0`).
 2. **Interlace** (item 5): did not work at all with GroovyMAME (each blit is one field,
    the FPGA waited for a whole frame and timed out). Implemented 2026-10-31 in sim;
    HW-confirmed 2026-11-01 with `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs` (Sonic 2, 320x448i).
