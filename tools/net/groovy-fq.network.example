@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Groovy_TaNGer - systemd-networkd: the fq qdisc for GroovyMAME's -mister_pacing.
+# Add the [FairQueueing] section to the .network file that already matches the sending
+# interface (/etc/systemd/network/*.network), then: networkctl reload && networkctl reconfigure <if>
+# See docs/groovymame_client.md, "Making fq persistent".
+
+[Match]
+Name=eno1
+
+[FairQueueing]
+Parent=root
+FlowLimit=1000

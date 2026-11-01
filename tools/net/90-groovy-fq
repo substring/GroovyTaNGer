@@ -1,0 +1,12 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Groovy_TaNGer - NetworkManager dispatcher script: put the fq qdisc on the interface
+# that sends GroovyMAME's stream, every time it comes up, so -mister_pacing works
+# (the default fq_codel ignores SO_MAX_PACING_RATE). flow_limit 1000: fq's default of 100
+# packets is less than one frame. See docs/groovymame_client.md, "Making fq persistent".
+#
+# Install (root):  install -m 755 tools/net/90-groovy-fq /etc/NetworkManager/dispatcher.d/
+# Edit IFACE below to the sending interface.
+IFACE=enp6s0
+[ "$1" = "$IFACE" ] && [ "$2" = "up" ] && exec tc qdisc replace dev "$IFACE" root fq flow_limit 1000
+exit 0

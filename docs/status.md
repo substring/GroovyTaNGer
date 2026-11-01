@@ -165,6 +165,9 @@ stops answering, button S0 resets it without reflashing.
    ~256 px wide on 100 Mbit. Design notes in `docs/groovymame_client.md`.
 7. **Pacing on Windows / macOS**: no fq there; portable answer = a sender thread in
    GroovyMAME (notes in `docs/groovymame_client.md`).
+8. **fq persistence on the PC**: `tools/net/90-groovy-fq` (NetworkManager dispatcher) or
+   `tools/net/groovy-fq.network.example` (systemd-networkd), to install by the user; see
+   "Making fq persistent" in `docs/groovymame_client.md`.
 
 How to set up a GroovyMAME run (rgb565 + pacing patches, fq qdisc): the recap at the top
 of `docs/groovymame_client.md`.

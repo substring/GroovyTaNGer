@@ -12,10 +12,12 @@ Everything below is needed together; each one is explained further down.
 1. **RGB565 from GroovyMAME** - `patches/groovymame-mister-rgb565.patch`, option
    `-mister_rgb_mode rgb565`. Raw RGB888 does not fit 100 Mbit; RGB565 does.
 2. **Kernel pacing in GroovyMAME** - `patches/groovymame-mister-pacing.patch` (apply after
-   the rgb565 one), option `-mister_pacing 1.0`. Spreads each frame over the raster time
+   the rgb565 one; a fork patched before 2026-11-01 also needs
+   `groovymame-mister-pacing-raise-fix.patch`), option `-mister_pacing 1.0`. Spreads each frame over the raster time
    instead of a wire-speed burst that overflows the FPGA's 32-line ring; the emulation
    thread does not wait.
-3. **The `fq` qdisc on the sending interface** (root, not persistent), without which
+3. **The `fq` qdisc on the sending interface** (root, not persistent by itself: see
+   "Making fq persistent" below), without which
    `-mister_pacing` silently does nothing:
    ```bash
    tc qdisc replace dev <interface> root fq flow_limit 1000
@@ -331,6 +333,23 @@ the socket (same local port, the FPGA answers there) when the rate must go up -
 Also learned: the qdisc is not persistent; after a reboot it is `fq_codel` again and
 `-mister_pacing` silently does nothing (the 320-px modes then overflow the ring: a black
 horizontal band in the middle of the picture, top and bottom quarters fine).
+
+## Making fq persistent (2026-11-01)
+
+`tc qdisc replace` lasts until the next reboot or link reset; then the interface is back
+to `fq_codel` (systemd's `/usr/lib/sysctl.d/50-default.conf` sets
+`net.core.default_qdisc = fq_codel`) and `-mister_pacing` silently does nothing. Only the
+machine that RUNS GroovyMAME needs it (the 5800X: NetworkManager; g4ge: systemd-networkd).
+
+| Way | Status |
+|---|---|
+| **NetworkManager dispatcher script** `tools/net/90-groovy-fq` -> `/etc/NetworkManager/dispatcher.d/` (root, mode 755; set `IFACE`) | Recommended for a NetworkManager desktop: runs the exact `tc` command, `flow_limit` included, each time the interface comes up |
+| NetworkManager native `nmcli connection modify <con> tc.qdiscs "root fq"` | Unverified: whether NM passes `flow_limit` for `fq` is not known, and the default 100 is less than one frame |
+| **systemd-networkd** `[FairQueueing] Parent=root FlowLimit=1000` in the interface's `.network` (example `tools/net/groovy-fq.network.example`) | For networkd systems (g4ge; likely the GroovyArcade way) |
+| `net.core.default_qdisc = fq` (sysctl) | Not enough: `flow_limit` stays 100, the tail of every frame is dropped |
+| Pacing in userspace (a sender thread in GroovyMAME) | No qdisc, no root, portable (also the Windows/macOS answer below); not written |
+
+Check after a reboot: `tc qdisc show dev <if>` must print `fq ... flow_limit 1000p`.
 
 ## Pacing on Windows and macOS (discussion 2026-10-31, nothing implemented)
 
