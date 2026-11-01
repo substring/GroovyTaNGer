@@ -309,7 +309,10 @@ untouched (DVI has no interlace flag; the sink sees only the half-line VSYNC); i
 field order right on the tube (if the picture "combs" or lines are swapped pairwise, the
 fix is to swap which field gets the half-line VSYNC); no serration/equalising pulses yet.
 
-## Pacing bug: the rate could only go down (2026-11-01, fixed in the patch, not HW-tested)
+## Pacing bug: the rate could only go down (2026-11-01, fixed, HW-confirmed)
+
+**HW (2026-11-01, user): with the fix, `fq` and `-mister_pacing 1.0`, Sonic 2 in 320x224
+(VIDEO_MODE 4, user's crt_range, `-aspect 4:3`) "marche parfaitement".**
 
 First real run of `-mister_pacing 1.0` (the earlier runs had `fq_codel`, which ignores the
 rate, so pacing never acted): sound glitches, the picture never complete, every
