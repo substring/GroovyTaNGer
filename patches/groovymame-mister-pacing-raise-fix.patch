@@ -1,0 +1,96 @@
+GroovyMAME nogpu pacing: recreate the socket to RAISE the pacing rate (2026-11-01)
+
+Incremental fix for a fork that already has groovymame-mister-pacing.patch as first
+published (2026-10-30); a fresh checkout applies the updated groovymame-mister-pacing.patch.
+
+Raising the rate (2026-11-01 fix): Linux can only LOWER a UDP socket's pacing rate
+(SO_MAX_PACING_RATE sets sk_pacing_rate = min(sk_pacing_rate, rate); TCP recomputes it,
+UDP never raises it). After a narrower mode (256 px wide, 8.25 MB/s) the next wider one
+(320 px, 10.3 MB/s) stayed at 8.25 MB/s: frames queued up, the FPGA's ACKs came ~24
+lines later every frame until GroovyMAME lost sync (timeouts, sound and picture broken).
+To go up, the socket is recreated on the same local port.
+
+diff --git a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawnogpu.cpp
+index 8b58ff20e10..bacf6ef2903 100644
+--- a/src/osd/modules/render/drawnogpu.cpp
++++ b/src/osd/modules/render/drawnogpu.cpp
+@@ -181,6 +181,7 @@ private:
+ 	int m_rgb_mode = 0;	// CMD_INIT rgbMode: 0 = RGB888, 2 = RGB565
+ 	int m_bpp = 3;		// bytes per pixel on the wire
+ 	double m_pacing = 0.0;	// kernel pacing, multiple of the raster line rate (0 = off)
++	uint32_t m_pacing_rate = 0;	// rate set on the socket, bytes/s (0 = none yet)
+ 	bool m_show_window = false;
+ 	bool m_is_internal_fe = false;
+ 	bool m_autofilter = false;
+@@ -225,6 +226,7 @@ private:
+ 	bool nogpu_init();
+ 	bool nogpu_send_command(void *command, int command_size);
+ 	bool nogpu_switch_video_mode();
++	bool nogpu_reopen_socket();
+ 	void nogpu_blit(uint32_t frame, uint16_t vsync, uint16_t line_width);
+ 	void nogpu_send_mtu(char *buffer, int bytes_to_send, int chunk_max_size);
+ 	//void nogpu_send_lz4(char *buffer, int bytes_to_send, int block_size);
+@@ -634,6 +636,42 @@ bool renderer_nogpu::nogpu_init()
+ 	return false;
+ }
+ 
++//============================================================
++//  renderer_nogpu::nogpu_reopen_socket()
++//  (Linux, pacing only) a new socket on the SAME local port, so the receiver, which
++//  answers to the port it hears from, keeps reaching us
++//============================================================
++
++bool renderer_nogpu::nogpu_reopen_socket()
++{
++	#if defined(SO_MAX_PACING_RATE)
++	sockaddr_in local = {};
++	socklen_t local_size = sizeof(local);
++	if (getsockname(m_sockfd, (sockaddr*)&local, &local_size) < 0)
++		return false;
++
++	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++	if (fd < 0)
++		return false;
++
++	close(m_sockfd);	// frees the port for the bind below
++	m_sockfd = fd;
++	if (bind(m_sockfd, (sockaddr*)&local, sizeof(local)) < 0)
++		osd_printf_verbose("nogpu: could not bind the new socket to port %d\n", ntohs(local.sin_port));
++
++	int flags = fcntl(m_sockfd, F_GETFL, 0);
++	if (flags >= 0)
++		fcntl(m_sockfd, F_SETFL, flags | O_NONBLOCK);
++
++	int opt_val = SEND_BIFFER_SIZE;
++	setsockopt(m_sockfd, SOL_SOCKET, SO_SNDBUF, (char*)&opt_val, sizeof(opt_val));
++	osd_printf_verbose("nogpu: socket reopened on port %d\n", ntohs(local.sin_port));
++	return true;
++	#else
++	return false;
++	#endif
++}
++
+ //============================================================
+ //  renderer_nogpu::nogpu_switch_video_mode()
+ //============================================================
+@@ -710,10 +748,20 @@ bool renderer_nogpu::nogpu_switch_video_mode()
+ 		// headers per 1472-byte datagram
+ 		double line_bytes = (double)m_width * m_bpp * (1472.0 + 42.0) / 1472.0;
+ 		uint32_t rate = (uint32_t)(line_bytes * mode->hfreq * m_pacing);
++		// Linux can only LOWER a UDP socket's pacing rate: SO_MAX_PACING_RATE does
++		// sk_pacing_rate = min(sk_pacing_rate, rate) and, unlike TCP, nothing raises it
++		// again. After a narrower mode (e.g. 256 px) a wider one stayed paced too slowly:
++		// its frames queued up, the receiver's ACKs came later every frame and the sync
++		// was lost. A fresh socket starts unlimited, so recreate it to go up.
++		if (m_pacing_rate != 0 && rate > m_pacing_rate && !nogpu_reopen_socket())
++			osd_printf_verbose("nogpu: could not reopen the socket to raise the pacing rate\n");
+ 		if (setsockopt(m_sockfd, SOL_SOCKET, SO_MAX_PACING_RATE, &rate, sizeof(rate)) < 0)
+ 			osd_printf_verbose("nogpu: could not set the pacing rate\n");
+ 		else
++		{
++			m_pacing_rate = rate;
+ 			osd_printf_verbose("nogpu: pacing %u bytes/s (%.3f x the line rate)\n", rate, m_pacing);
++		}
+ 	}
+ 	#endif
+ 	m_bilinear = m_autofilter & display->is_stretched();

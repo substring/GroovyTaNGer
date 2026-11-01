@@ -56,6 +56,7 @@ Apply in this order, on 4ce01b9 (`libretro-driver`):
 |---|---|---|
 | `groovymame-mister-rgb565.patch` | `-mister_rgb_mode rgb565` | 5-byte CMD_INIT with rgbMode 2 (already in the protocol, MiSTer supports it) and 2-byte little-endian pixels. Default rgb888 keeps the 4-byte INIT. |
 | `groovymame-mister-pacing.patch` | `-mister_pacing <F>` | Sets `SO_MAX_PACING_RATE` = F x bytes per raster line x hfreq at each SWITCHRES, so the kernel spreads the frame over the raster time. Default 0 = off. Linux only. |
+| `groovymame-mister-pacing-raise-fix.patch` | (same) | 2026-11-01 fix, already folded into the pacing patch above: Linux only ever LOWERS a UDP socket's pacing rate, so to raise it after a narrower mode the socket is recreated on the same local port. |
 
 Both apply cleanly and their files compile (g++ -std=c++20 -Werror); neither has run
 against the board yet.
@@ -307,6 +308,26 @@ questions: does the HDMI->VGA converter pass a 15 kHz interlaced signal through
 untouched (DVI has no interlace flag; the sink sees only the half-line VSYNC); is the
 field order right on the tube (if the picture "combs" or lines are swapped pairwise, the
 fix is to swap which field gets the half-line VSYNC); no serration/equalising pulses yet.
+
+## Pacing bug: the rate could only go down (2026-11-01, fixed in the patch, not HW-tested)
+
+First real run of `-mister_pacing 1.0` (the earlier runs had `fq_codel`, which ignores the
+rate, so pacing never acted): sound glitches, the picture never complete, every
+`wait_status` a timeout. GroovyMAME's log: rates right (`pacing 10347860` for 320x240,
+`8246692` for 256x192, then `10295092` for 320x224), but the ACK vCount drifted ~24
+lines later every frame (206, 229, 256, 21 of the next frame...) until the ACKs came too
+late and the sync was lost; `tc -s qdisc` showed 24 436 packets dropped by `flow_limit`.
+Cause, reproduced on the 5800X with a GroovyMAME-like load (101 datagrams per frame at
+59.92 Hz): Linux's `SO_MAX_PACING_RATE` sets `sk_pacing_rate = min(sk_pacing_rate, new)`
+and nothing raises it again on a UDP socket, so after the 256-px mode the 320-px one
+stayed at 8.25 MB/s for ~9.0 MB/s of data. At one fixed 10.35 MB/s rate the backlog
+drains every frame (no drop); set 8.25 then 10.35 and it grows every frame. Fix: recreate
+the socket (same local port, the FPGA answers there) when the rate must go up -
+`patches/groovymame-mister-pacing-raise-fix.patch` on the fork as it is.
+
+Also learned: the qdisc is not persistent; after a reboot it is `fq_codel` again and
+`-mister_pacing` silently does nothing (the 320-px modes then overflow the ring: a black
+horizontal band in the middle of the picture, top and bottom quarters fine).
 
 ## Pacing on Windows and macOS (discussion 2026-10-31, nothing implemented)
 
