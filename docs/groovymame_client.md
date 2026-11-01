@@ -187,7 +187,13 @@ modes are where pacing matters, on the 15 kHz raster too:
 To check on the hardware: a 256- or 320-wide mode without `-mister_pacing` (expect
 glitches in the lower part of the picture), then with it.
 
-## Interlace (implemented 2026-10-31, sim only, not HW-tested)
+## Interlace (implemented 2026-10-31, HW-confirmed 2026-11-01)
+
+**HW result (2026-11-01, user):** Sonic 2 (Genesis, 2-player mode) on the 15 kHz CRT through
+the HDMI->VGA converter, bitstream `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs`: the game
+switched to **320x448i** and it works very well; the progressive <-> interlaced switches
+are seamless ("d'une fluidité juste incroyable"). So the converter passes 15 kHz
+interlace through, and the field order is right.
 
 Why it "did not work at all" on the first run: GroovyMAME's `-mister_interlaced_fb`
 defaults to 1, which means **each blit is ONE field** (`vactive/2` lines,

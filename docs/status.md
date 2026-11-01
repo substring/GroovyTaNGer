@@ -68,7 +68,8 @@ stops answering, button S0 resets it without reflashing.
    converters accept a low pixel clock (~6.7 MHz for 320x240 @ 15 kHz)? If they need the
    ~25 MHz HDMI minimum, replicate pixels horizontally (super-resolution: same line and
    frame rates, the CRT sees no difference). Test on the user's real converter.
-5. **Interlaced modes**: implemented 2026-10-31, sim-validated, **not HW-tested** (see
+5. **Interlaced modes**: implemented 2026-10-31, **HW-confirmed 2026-11-01** (Sonic 2 in
+   320x448i on the CRT via the converter, seamless p<->i switches; see
    `docs/groovymame_client.md`, "Interlace"). A blit is one field (GroovyMAME's default
    `-mister_interlaced_fb 1`); VIDEO_MODE 2/3 generate a real 2:1 raster (263/262-line
    fields, half-line VSYNC, `video_timing_gen_il.v`); ACK bit 5 = field, vCount in frame
@@ -145,7 +146,7 @@ stops answering, button S0 resets it without reflashing.
    and totals at pclk x N (super-resolution, N so that pclk x N >= ~25 MHz), dynamic PLL.
 2. **Interlace** (item 5): did not work at all with GroovyMAME (each blit is one field,
    the FPGA waited for a whole frame and timed out). Implemented 2026-10-31 in sim;
-   HW test with `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs`.
+   HW-confirmed 2026-11-01 with `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs` (Sonic 2, 320x448i).
 3. **Audio crackle in the treble** with GroovyMAME: read `AU=`/`AL=` on the UART (g4ge)
    during a run first; see `docs/groovymame_client.md`.
 4. **Input lag**: to measure (user).
