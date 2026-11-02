@@ -290,6 +290,8 @@ module gwline_modeline_tb;
                 if (good_max[k] != seg_h[s]) errors = errors + 1;
             end
         $write("\n");
+        $display("ring stats since the last mode change: lead %0d..%0d, bad %0d (late %0d, early %0d, other %0d)",
+                 dut.st_lmin, dut.st_lmax, dut.st_bad, dut.st_late, dut.st_early, dut.st_other);
         $display("wrong lines: %0d; blit timeouts TO=%0d, frames received RD=%0d of %0d",
                  wrong_lines, dut.to_cnt, dut.frame_cnt, nf_total);
         if (wrong_lines != 0 || dut.to_cnt != 0 || dut.frame_cnt != nf_total) errors = errors + 1;

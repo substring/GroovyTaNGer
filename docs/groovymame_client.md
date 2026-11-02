@@ -145,6 +145,40 @@ Ways around it, for later:
   lines): a little more margin, not a solution;
 - a bigger ring (384-column slots: ~64 lines for about +7 BSRAM).
 
+### Measured 2026-11-02: the lead follows the emulation time (Sonic 2, 320x224, fd 9.101)
+
+`LT` on the UART over 30 s, 1 sample per ~6.5 frames: median 23 lines (the formula above
+gives 23), 90 % of the samples 18..27, extremes 6..35. User: black flashes and black lines
+for about one frame. So the ring is NOT oversized, and today's spread nearly fills it.
+
+The GroovyMAME `-v` log explains the spread. `fd` stays at 9.101 (the cap set by the 1.5 ms
+`mister_fd_margin`, since Dm stays below it), so the blit target stays at line 238. But
+`nogpu_wait_status` starts the next emulation so that the blit lands on the target if
+emulation takes the AVERAGE time. The error of each frame is then
+
+    blit line ~= 238 + (emulation_time - ft_avg) * 15.6 lines/ms
+
+Checked on the log: 2.400 vs 1.269 ms -> predicted 255.7, ACK 256; 2.193 vs 1.193 ms ->
+253.6, ACK 253; 0.881 vs 1.215 ms -> 232.8, ACK 231. It is not cumulative (each frame is
+re-aimed from the last ACK). The ACK lines seen in the 200-frame log tail are 231..256.
+
+With pacing, the writer and the raster run at the same speed, so an error at the top lasts
+the whole frame: a frame past either edge of the window should lose most of its lines, not
+just one. Expected to be the flash; the new counters below test it. The edges at fd 9.1: an
+emulation about 0.5 ms faster than average overflows the ring (lead >= ~31), about 1.5 ms
+slower misses the top (lead <= 0).
+
+UART fields added for this (`groovy_ring_stats.v`, bitstream
+`impl/variants/gwline_mode4_stats.fs`): `LN`/`LX` = min/max SIGNED lead of EVERY frame since
+the previous UART line (two's complement), `BF` = frames shown incomplete, split into `LF`
+late, `EF` early, `OF` other. They restart at CMD_INIT and CMD_SWITCHRES.
+
+Consequences for the ring size: shrinking it needs the launch time decoupled from the
+emulation time (kernel `SO_TXTIME`, to verify: `fq` is an earliest-departure-time qdisc, so
+`etf` may not be needed). Lead and margin then become our choice, and the ring size follows
+from the measured network jitter. Cheap test first, no rebuild: a smaller
+`-mister_fd_margin` centres the window (1.3 ms -> lead ~19), at the cost of late margin.
+
 ## First run with GroovyMAME (2026-10-30)
 
 Sonic 2 (Genesis Plus GX, libretro driver) with `-mister_rgb_mode rgb565`, board still on

@@ -562,7 +562,26 @@ module gwline_top #(
     //   TO=blit_rx timeouts (a frame that never completed: lost datagram), cumulative
     //   RJ=udp.sv RX-FIFO admission rejects, cumulative
     //   VF=video frames since reset   SE=any UDP payload seen   TL=HDMI PLL locked
+    //   LN,LX=min, max SIGNED lead (two's complement) of every frame since the last line
+    //   BF=frames shown incomplete, of which LF=late EF=early OF=other, cumulative
+    //   (see groovy_ring_stats.v)
     // =========================================================================
+    // Ring health over every frame. The min/max window restarts with each UART line (the
+    // request crosses from the 27 MHz UART domain as a toggle).
+    wire        dbg_line_start;
+    reg         dbg_line_tgl = 1'b0;
+    always @(posedge clk) if (dbg_line_start) dbg_line_tgl <= ~dbg_line_tgl;
+    logic [2:0] dbg_line_50;
+    always_ff @(posedge clk50m) dbg_line_50 <= {dbg_line_50[1:0], dbg_line_tgl};
+    wire signed [15:0] st_lmin, st_lmax;
+    wire [15:0] st_bad, st_late, st_early, st_other;
+    groovy_ring_stats #(.NLINES(NLINES)) u_ring_stats (
+        .clk(clk50m), .rst(video_rst), .frame_start(blit_valid), .raster_line(src_line_wr),
+        .good_lines(gl_50), .want_lines(src_out_h[9:0]),
+        .window_clear(dbg_line_50[2] ^ dbg_line_50[1]),
+        .lead_min(st_lmin), .lead_max(st_lmax), .bad_frames(st_bad), .late_frames(st_late),
+        .early_frames(st_early), .other_frames(st_other));
+
     logic [15:0] frame_cnt;
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) frame_cnt <= 16'd0; else if (frame_done) frame_cnt <= frame_cnt + 16'd1;
@@ -578,11 +597,14 @@ module gwline_top #(
     // snapshot into the 27 MHz UART domain (debug only: a value caught mid-change shows
     // up as one odd line in the log, nothing more)
     reg [15:0] q_fc, q_wl, q_rl, q_lt, q_gl, q_to, q_rj, q_vf, q_al, q_au;  reg q_se, q_tl;
+    reg [15:0] q_ln, q_lx, q_bf, q_lf, q_ef, q_of;
     always @(posedge clk) begin
         q_fc <= frame_cnt;  q_wl <= write_line;  q_rl <= src_line_wr;  q_lt <= lead_top;
         q_gl <= {6'd0, gl_50};  q_to <= to_cnt;  q_rj <= rj_cnt;  q_vf <= vframe_cnt;
         q_se <= rx_seen;  q_tl <= tmds_lock_sync[1];
         q_al <= {3'd0, a_level};  q_au <= a_underruns;
+        q_bf <= st_bad;  q_lf <= st_late;  q_ef <= st_early;  q_of <= st_other;
+        if (dbg_line_start) begin q_ln <= st_lmin;  q_lx <= st_lmax; end
     end
 
     wire [7:0] tx_din; wire tx_wr, tx_busy;
@@ -592,14 +614,17 @@ module gwline_top #(
     function [31:0] hx4; input [15:0] v;
         hx4 = {hxd(v[15:12]), hxd(v[11:8]), hxd(v[7:4]), hxd(v[3:0])};
     endfunction
-    localparam integer DBGLEN = 91;
+    localparam integer DBGLEN = 131;
     wire [8*DBGLEN-1:0] dmsg = {
         "RD=", hx4(q_fc), " WL=", hx4(q_wl), " RL=", hx4(q_rl), " LT=", hx4(q_lt),
         " GL=", hx4(q_gl), " TO=", hx4(q_to), " RJ=", hx4(q_rj), " VF=", hx4(q_vf),
         " SE=", hxd({3'b0, q_se}), " TL=", hxd({3'b0, q_tl}),
-        " AL=", hx4(q_al), " AU=", hx4(q_au), 8'h0D, 8'h0A };
+        " AL=", hx4(q_al), " AU=", hx4(q_au),
+        " LN=", hx4(q_ln), " LX=", hx4(q_lx), " BF=", hx4(q_bf), " LF=", hx4(q_lf),
+        " EF=", hx4(q_ef), " OF=", hx4(q_of), 8'h0D, 8'h0A };
     reg [7:0] di=0, dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0;
     wire [7:0] dlb = dmsg[8*(DBGLEN-1-di) +: 8];
+    assign dbg_line_start = (dst == 3'd0);
     always @(posedge clk) begin
         dwr<=1'b0;
         case (dst)
