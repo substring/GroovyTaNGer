@@ -173,6 +173,29 @@ UART fields added for this (`groovy_ring_stats.v`, bitstream
 the previous UART line (two's complement), `BF` = frames shown incomplete, split into `LF`
 late, `EF` early, `OF` other. They restart at CMD_INIT and CMD_SWITCHRES.
 
+Second run, with the counters (12 800 frames, ~3.5 min, ACK lines from the log, 60 s of
+UART): blit line 232..250 for nearly all frames, so lead ~11..29, median 23. In the 60 s:
+3591 frames, 1 incomplete. The first run's 5 of 279 UART samples suggested far more; not
+explained, the two runs did not cover the same part of the game. After the first ~20
+frames of the session (blit lines all over the place), only three frames missed the top,
+and one overflowed just after the last of those. All three on the dev PC, not g4ge:
+
+| Frame | ACK line | Cause, from the log |
+|---|---|---|
+| 1439 | 0 (late) | wait 16.121 ms instead of ~15.2 (the sleep overshot), and emulation +0.5 ms |
+| 7394 | 9 (late) | wait 16.871 ms instead of ~15.0, and emulation +0.3 ms |
+| 4647 | 6 (late) | PC on schedule (blit time as computed), yet ~1.9 ms late at the FPGA: not explained (ACKs also slow, success[3]); kernel or network path |
+| 4649 | 212 (early) | not looked at in detail; follows 4647 |
+
+So beside the emulation time there is a second source: the OS sleep in
+`nogpu_wait_status`, which targets the time without any margin. A launch time would cover
+both as long as emulation ends before it; the 4647 kind would remain.
+
+Bug found by this run, fixed: the `LN` values around -240 were not late frames. The sample
+before the raster's wrap is unreliable (multi-bit Gray step), which sometimes gave a wrong
+last line. `groovy_ring_stats` now keeps the end of the +1 run. Also `DBGLEN` was 8 short and
+cut `RD=` from the line. Before this fix, `LF`/`EF` could misfile a bad frame.
+
 Consequences for the ring size: shrinking it needs the launch time decoupled from the
 emulation time (kernel `SO_TXTIME`, to verify: `fq` is an earliest-departure-time qdisc, so
 `etf` may not be needed). Lead and margin then become our choice, and the ring size follows

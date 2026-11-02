@@ -614,7 +614,7 @@ module gwline_top #(
     function [31:0] hx4; input [15:0] v;
         hx4 = {hxd(v[15:12]), hxd(v[11:8]), hxd(v[7:4]), hxd(v[3:0])};
     endfunction
-    localparam integer DBGLEN = 131;
+    localparam integer DBGLEN = 139;
     wire [8*DBGLEN-1:0] dmsg = {
         "RD=", hx4(q_fc), " WL=", hx4(q_wl), " RL=", hx4(q_rl), " LT=", hx4(q_lt),
         " GL=", hx4(q_gl), " TO=", hx4(q_to), " RJ=", hx4(q_rj), " VF=", hx4(q_vf),

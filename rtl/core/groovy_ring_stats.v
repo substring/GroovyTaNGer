@@ -43,6 +43,11 @@ module groovy_ring_stats #(
 
     reg  [15:0] line_q;
     wire        top = (raster_line == 16'd0) && (line_q != 16'd0);   // raster wrapped
+    // The raster's wrap to 0 is the one multi-bit step of the Gray-coded raster_line (see
+    // groovy_linering.v): the sample just before the wrap can be any value, so the last
+    // line is the end of the +1 run, not line_q (one wrong v_last turned a healthy lead
+    // of 23 into -238 on HW).
+    reg  [15:0] run_end;
     reg  [15:0] v_last;                                              // last raster line
     wire        upper = (raster_line >= {1'b0, v_last[15:1]});
     wire signed [15:0] lead_now = upper ? $signed(v_last + 16'd1 - raster_line)
@@ -57,7 +62,7 @@ module groovy_ring_stats #(
     always @(posedge clk) begin
         line_q <= raster_line;
         if (rst) begin
-            v_last <= 16'd0;  settle <= 8'd0;
+            v_last <= 16'd0;  run_end <= 16'd0;  settle <= 8'd0;
             lead_cur <= 16'sd0;  lead_next <= 16'sd0;  lead_eval <= 16'sd0;
             have_cur <= 1'b0;  have_next <= 1'b0;  have_eval <= 1'b0;
             seen_prev <= 1'b0;  seen_eval <= 1'b0;
@@ -67,8 +72,10 @@ module groovy_ring_stats #(
         end else begin
             if (window_clear) begin lead_min <= MIN_INIT;  lead_max <= MAX_INIT; end
 
+            if (raster_line == line_q + 16'd1) run_end <= raster_line;
             if (top) begin
-                v_last <= line_q;
+                v_last <= run_end;
+                run_end <= 16'd0;
                 // the video frame that just ended, judged once good_lines has arrived
                 lead_eval <= lead_cur;  have_eval <= have_cur;  seen_eval <= seen_prev;
                 settle    <= SETTLE[7:0];

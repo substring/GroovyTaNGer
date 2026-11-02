@@ -69,6 +69,16 @@ module groovy_ring_stats_tb;
             frame(238, 10'd0);                         // judged at this top -> late
             check("skipped", late - l0, 2); check("bad+4", bad - b0, 4);
         end
+        begin : wrap_glitch                            // garbage sample before the wrap
+            integer l;
+            for (l = 0; l < 262; l = l + 1) begin
+                @(negedge clk); line = l; @(negedge clk);
+            end
+            @(negedge clk); line = 16'd999; @(negedge clk);
+            wc = 1; @(negedge clk); wc = 0;
+            frame(238, 10'd224);                       // lead must still be 24
+            check("glitch min", lmin, 24); check("glitch max", lmax, 24);
+        end
         if (errors == 0) $display("PASS groovy_ring_stats_tb");
         else $display("FAIL groovy_ring_stats_tb (%0d errors)", errors);
         $finish;
