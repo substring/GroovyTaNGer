@@ -162,12 +162,16 @@ stops answering, button S0 resets it without reflashing.
    already patched fork). Options: one combined patch, or a branch in the user's fork.
    Also candidate for it: ignore the desktop aspect for `-video mister` (the `-aspect 4:3`
    hack, `docs/groovymame_client.md`).
+5. **QOI compression** (item "Compression" below, design notes and licence question in
+   `docs/groovymame_client.md`): `amstan/qoi-fpga` has no licence on its Verilog, so ask
+   the author for one or write our own decoder from the public specification. Also what
+   makes item 3 possible at full width (a 640x240 field exceeds the 100 Mbit link).
 
 **P2**
-5. **OSD with the Dock buttons** (items 13 and 14: information overlay, buttons, OSD).
-6. **LEDs for diagnostics, including the RGB LED** (Dock LEDs are scrambled, see memory
+6. **OSD with the Dock buttons** (items 13 and 14: information overlay, buttons, OSD).
+7. **LEDs for diagnostics, including the RGB LED** (Dock LEDs are scrambled, see memory
    `tang-led-mapping`; the RGB LED pins to find on the Dock schematic).
-7. **"Bug": without `-skip_gameinfo`, MAME's first screen** (the game info screen) should
+8. **"Bug": without `-skip_gameinfo`, MAME's first screen** (the game info screen) should
    be at 31 kHz but shows a picture with a strange scan. Not investigated. Leads: the
    modeline sent (`-v`), VIDEO_MODE 4 then really outputs 31 kHz (pclk x N, a 640-px
    mode is cut at 512 columns), whether the CRT / converter accepts 31 kHz at all.
