@@ -142,6 +142,20 @@ stops answering, button S0 resets it without reflashing.
    board over the UART before using them. These pins sit on the DDR3's 1.5 V bank: declare them
    LVCMOS15. Needs a ~10 ms debounce. Later: a small OSD menu driven by the buttons.
 
+## Paused test, to resume (2026-11-02)
+
+Baseline of the ring health on Sonic 2, from the dev PC. Before testing:
+1. PC: `sudo ip addr add 192.168.15.15/24 dev enp6s0` (lost at reboot or link reset; check
+   `tc qdisc show dev enp6s0` shows `fq ... flow_limit 1000` too).
+2. g4ge (the board is there): `openFPGALoader -b tangprimer20k ~/groovy_tang/gwline_mode4_stats.fs`.
+   The FIXED build was never flashed: the UART line must start with `RD=`, not `WL=`.
+3. Same GroovyMAME command, `-v 2>&1 | tee /tmp/gm.log`, a few minutes, no `fd_margin` change.
+   Then read `LN LX BF LF EF OF` and compare with the log's ACK lines.
+4. Open: frames in `OF` (bad with a good lead; the old build could misfile them), the burst
+   of frames 20920-20930 (not analysed), then try `-mister_fd_margin 1.3`.
+The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
+`docs/groovymame_client.md`.
+
 ## Priorities (user, 2026-11-01) - START HERE
 
 **P1**
