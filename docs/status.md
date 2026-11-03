@@ -142,6 +142,15 @@ stops answering, button S0 resets it without reflashing.
    board over the UART before using them. These pins sit on the DDR3's 1.5 V bank: declare them
    LVCMOS15. Needs a ~10 ms debounce. Later: a small OSD menu driven by the buttons.
 
+## Plan for the next session (user, 2026-11-04)
+
+1. Try games native 640x480: confirm or not the expected 100 Mbit failure (P1 item 3: a
+   640x240 RGB565 field needs ~161 Mbit/s; the ring also cuts at 512 columns).
+2. Start QOI (P1 item 5; first decision: `amstan/qoi-fpga` has no licence, ask its author
+   or write our own decoder from the specification).
+Waiting, not started: the GroovyMAME send-time patch (start emulation ~2 ms early, spin
+until the send time), which would be a third separate patch. Use `-nosleep` in test runs.
+
 ## Paused test, to resume (2026-11-02)
 
 Baseline of the ring health on Sonic 2, from the dev PC. Before testing:
