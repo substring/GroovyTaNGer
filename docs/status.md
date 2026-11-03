@@ -56,8 +56,8 @@ stops answering, button S0 resets it without reflashing.
    audio bit semantics block a stock client; raw RGB888 does not fit 100 Mbit for most
    modes (decision: RGB565 client patch and/or LZ4). Fix order in that document.
    Done since (sim only): CMD 6, ACK frame counter / vCount / audio bit, RGB888 B,G,R
-   order, frame size from SWITCHRES. Client side: `patches/groovymame-mister-rgb565.patch`
-   and `patches/groovymame-mister-pacing.patch` (kernel pacing via the fq qdisc, so the
+   order, frame size from SWITCHRES. Client side: `patches/groovymame-mister.patch`
+   (RGB565, and kernel pacing via the fq qdisc, so the
    RGB565 burst does not overflow the 32-line ring), all in `docs/groovymame_client.md`,
    including the frame-delay constraint (fd >= ~8.9 for a 262-line mode).
 3. **Isolated short frames**: ~1 frame in 2000-3600 with a few lines missing mid-stream
@@ -172,12 +172,9 @@ The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
    (`LINE_W`), and one 640x240 field in RGB565 at 15.7 kHz needs ~161 Mbit/s, more than
    the 100 Mbit link (needs QOI, item "Compression", or a narrower width). Check what
    switchres picks (`-v | grep Modeline`).
-4. **Regroup the GroovyMAME patches** (or make a single one): today
-   `patches/groovymame-mister-rgb565.patch` + `groovymame-mister-pacing.patch` (raise
-   fix folded in) + `groovymame-mister-pacing-raise-fix.patch` (incremental, for the
-   already patched fork). Options: one combined patch, or a branch in the user's fork.
-   Also candidate for it: ignore the desktop aspect for `-video mister` (the `-aspect 4:3`
-   hack, `docs/groovymame_client.md`).
+4. **Regroup the GroovyMAME patches**: done 2026-11-03, `patches/groovymame-mister.patch`
+   (the user commits it to a branch of the fork). Still a candidate: ignore the desktop
+   aspect for `-video mister` (the `-aspect 4:3` hack, `docs/groovymame_client.md`).
 5. **QOI compression** (item "Compression" below, design notes and licence question in
    `docs/groovymame_client.md`): `amstan/qoi-fpga` has no licence on its Verilog, so ask
    the author for one or write our own decoder from the public specification. Also what
