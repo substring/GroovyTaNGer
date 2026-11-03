@@ -215,6 +215,12 @@ recorded throughout): after the 13-15 bad frames of the session start, 27 bad fr
 - Not measured: jitter between lines inside a frame (only the frame start is timed). It must
   be known before choosing a smaller ring.
 
+`-nosleep` run (2026-11-03, same setup, 36 500 frames): sleep overshoot gone (max 0.4 lines,
+was 35.8), confirmed. After the 15 bad frames of the session start: 24 bad frames in
+35 700 (one per ~25 s, reference ~20 s, not a significant gain): 4 `LF`, 8 `EF`, 12 `OF`.
+Emulation spikes unchanged (up to +29 lines), now clearly the main cause. Residual stdev
+1.1 lines, 1 %..99 % = -2.0..+3.1. Keep `-nosleep` anyway (costs one busy core).
+
 Consequences for the ring size: shrinking it needs the launch time decoupled from the
 emulation time (kernel `SO_TXTIME`, to verify: `fq` is an earliest-departure-time qdisc, so
 `etf` may not be needed). Lead and margin then become our choice, and the ring size follows
