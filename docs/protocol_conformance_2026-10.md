@@ -122,7 +122,7 @@ New findings while testing:
   requests gave 3 ACKs. The reference answers every one. GroovyMAME does not burst, but a
   queued trigger would be more faithful.
 
-**RGB565 client patch ready (2026-10-30)**: `patches/groovymame-mister-rgb565.patch` (since 2026-11-03 in `groovymame-mister.patch`)
+**RGB565 client patch ready (2026-10-30)**: `patches/groovymame-mister-rgb565.patch`
 (GroovyMAME option `-mister_rgb_mode rgb565`, 5-byte CMD_INIT with rgbMode 2; rgb888 stays
 the default and keeps the 4-byte INIT). Applies to the user's fork 4ce01b9, compiles; not
 yet run against the board.

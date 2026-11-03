@@ -72,7 +72,7 @@ def main():
                    help="GroovyMAME dialect: 4-byte INIT (RGB888), CMD_BLIT_VSYNC 6, 1472-byte chunks")
     p.add_argument("--rgb565", action="store_true",
                    help="with --groovymame: GroovyMAME patched with -mister_rgb_mode rgb565 "
-                        "(patches/groovymame-mister.patch): 5-byte INIT, 2-byte pixels")
+                        "(patches/groovymame-mister-rgb565.patch): 5-byte INIT, 2-byte pixels")
     p.add_argument("--interlace", action="store_true",
                    help="with --groovymame: CMD_SWITCHRES announces 2*height lines interlaced "
                         "(interlace=1, GroovyMAME's -mister_interlaced_fb 1); each blit is one "

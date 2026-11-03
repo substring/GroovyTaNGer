@@ -9,9 +9,10 @@ Primer 20K Dock's 100 Mbit Ethernet. Protocol conformance itself is in
 
 Everything below is needed together; each one is explained further down.
 
-1. **RGB565 from GroovyMAME** - `patches/groovymame-mister.patch`, option
+1. **RGB565 from GroovyMAME** - `patches/groovymame-mister-rgb565.patch`, option
    `-mister_rgb_mode rgb565`. Raw RGB888 does not fit 100 Mbit; RGB565 does.
-2. **Kernel pacing in GroovyMAME** - same patch, option `-mister_pacing 1.0`. Spreads each frame over the raster time
+2. **Kernel pacing in GroovyMAME** - `patches/groovymame-mister-pacing.patch` (apply after
+   the rgb565 one), option `-mister_pacing 1.0`. Spreads each frame over the raster time
    instead of a wire-speed burst that overflows the FPGA's 32-line ring; the emulation
    thread does not wait.
 3. **The `fq` qdisc on the sending interface** (root, not persistent by itself: see
@@ -48,15 +49,18 @@ the 32-line ring - see "The real constraint" below.
 The renderer is called **`mister`**, not `nogpu` (`osd_module(OSD_RENDERER_PROVIDER,
 "mister")`); `-video nogpu` falls back to `auto` without an error.
 
-## The client patch (`patches/groovymame-mister.patch`, for the user's fork substring/GroovyMAME)
+## Two client patches (in `patches/`, for the user's fork substring/GroovyMAME)
 
-One patch since 2026-11-03, on 4ce01b9 (`libretro-driver`); it replaces the three earlier
-files (rgb565, pacing, raise fix; see git history). Identical to the fork that ran on the board.
+Apply in this order, on 4ce01b9 (`libretro-driver`):
 
-| Option | What |
-|---|---|
-| `-mister_rgb_mode rgb565` | 5-byte CMD_INIT with rgbMode 2 (already in the protocol, MiSTer supports it) and 2-byte little-endian pixels. |
-| `-mister_pacing <F>` | Sets `SO_MAX_PACING_RATE` = F x bytes per raster line x hfreq at each SWITCHRES, so the kernel spreads the frame over the raster time. Default 0 = off. Linux only. Linux only ever LOWERS a UDP socket's pacing rate, so to raise it after a narrower mode the socket is recreated on the same local port. |
+| Patch | Option | What |
+|---|---|---|
+| `groovymame-mister-rgb565.patch` | `-mister_rgb_mode rgb565` | 5-byte CMD_INIT with rgbMode 2 (already in the protocol, MiSTer supports it) and 2-byte little-endian pixels. Default rgb888 keeps the 4-byte INIT. |
+| `groovymame-mister-pacing.patch` | `-mister_pacing <F>` | Sets `SO_MAX_PACING_RATE` = F x bytes per raster line x hfreq at each SWITCHRES, so the kernel spreads the frame over the raster time. Default 0 = off. Linux only. Linux only ever LOWERS a UDP socket's pacing rate, so to raise it after a narrower mode the socket is recreated on the same local port. |
+
+Two separate patches on purpose: the user discusses each with Calamity, and does not commit
+them to the fork (they stay local changes there). Both run on the board. A later client
+change gets its own patch too.
 
 ## Why the bandwidth is the whole story
 
@@ -405,7 +409,7 @@ and nothing raises it again on a UDP socket, so after the 256-px mode the 320-px
 stayed at 8.25 MB/s for ~9.0 MB/s of data. At one fixed 10.35 MB/s rate the backlog
 drains every frame (no drop); set 8.25 then 10.35 and it grows every frame. Fix: recreate
 the socket (same local port, the FPGA answers there) when the rate must go up -
-the raise fix on the fork as it is (now in `patches/groovymame-mister.patch`).
+since 2026-11-01 in `patches/groovymame-mister-pacing.patch`.
 
 Also learned: the qdisc is not persistent; after a reboot it is `fq_codel` again and
 `-mister_pacing` silently does nothing (the 320-px modes then overflow the ring: a black
