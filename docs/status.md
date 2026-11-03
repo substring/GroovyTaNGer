@@ -153,6 +153,8 @@ Baseline of the ring health on Sonic 2, from the dev PC. Before testing:
    Then read `LN LX BF LF EF OF` and compare with the log's ACK lines.
 4. Open: frames in `OF` (bad with a good lead; the old build could misfile them), the burst
    of frames 20920-20930 (not analysed), then try `-mister_fd_margin 1.3`.
+Update 2026-11-03: reference run done on the fixed build (steps 1-3): one bad frame per
+~20 s, cause mostly emulation jitter, PC-to-FPGA path +-3 lines. Left: `-mister_fd_margin 1.3`.
 The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
 `docs/groovymame_client.md`.
 

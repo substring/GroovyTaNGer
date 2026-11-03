@@ -196,6 +196,25 @@ before the raster's wrap is unreliable (multi-bit Gray step), which sometimes ga
 last line. `groovy_ring_stats` now keeps the end of the +1 run. Also `DBGLEN` was 8 short and
 cut `RD=` from the line. Before this fix, `LF`/`EF` could misfile a bad frame.
 
+Reference run, fixed bitstream (2026-11-03, Sonic 2, dev PC, ~10 min, 37 500 frames, UART
+recorded throughout): after the 13-15 bad frames of the session start, 27 bad frames in
+33 100 (one per ~20 s): 7 `LF`, 11 `EF`, 9 `OF`. TO = RJ = 0. Lead median 21-25 lines.
+- `OF` is mostly "just late": 8 of the 9 happen in a UART window whose `LN` is 1..4. So the
+  usable window on HW looks like lead ~5..30, not 1..31 (a line only counts once its last
+  pixel is in, and a datagram carries 2.3 lines). Correlation, not proof: a window is ~6
+  frames. The 9th (`LN` 21) is unexplained.
+- Each frame's blit error split from the log (35 500 frames, sleep overshoot from the
+  timestamps, emulation = emulation_time - ft_avg, residual = what is left):
+  residual stdev 1.2 lines, 1 %..99 % = -2.3..+3.2: **the PC-to-FPGA path is not the
+  problem**. Emulation 1 %..99 % = -4.3..+6.5 lines, spikes to +25. Sleep overshoot is
+  normally 0, rare but the biggest (5 frames of +18..+36).
+- One emulation spike costs twice: the spike is late, then the raised `ft_avg` aims the next
+  ~10 frames early (frames 26851 -> 26860-26869, 17340 -> 17344-17352). This is the source
+  of the `EF` bursts. Of the 66 frames outside lines 232..255: 43 emulation early, 16
+  emulation late, 5 sleep late, 2 residual early.
+- Not measured: jitter between lines inside a frame (only the frame start is timed). It must
+  be known before choosing a smaller ring.
+
 Consequences for the ring size: shrinking it needs the launch time decoupled from the
 emulation time (kernel `SO_TXTIME`, to verify: `fq` is an earliest-departure-time qdisc, so
 `etf` may not be needed). Lead and margin then become our choice, and the ring size follows
