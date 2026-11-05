@@ -151,6 +151,19 @@ stops answering, button S0 resets it without reflashing.
 Waiting, not started: the GroovyMAME send-time patch (start emulation ~2 ms early, spin
 until the send time), which would be a third separate patch. Use `-nosleep` in test runs.
 
+## PS2 480i test (2026-11-05): fails as predicted
+
+Mode from the board (`srresult`): pclk 13.509 MHz (x2 = 27 MHz), h_total 861, v_total 523,
+interlaced, 224-line fields. One 640-px field in RGB565 = ~141 Mbit/s with headers, over
+the 100 Mbit link. UART over ~70 s of stream: only ~1 field in 3 completes (RD +1345),
+TO +464 blit timeouts (lost datagrams), audio underruns +1800 (AU), nearly every frame bad
+(BF +3460, mostly LF). User: picture and sound wrecked. Also expected but not visible in
+this mess: the ring keeps 512 of the 640 columns. No GroovyMAME log of this run.
+For QOI: GroovyMAME has no QOI encoder (only lz4/lz4hc), so a client patch is needed too.
+A 640 ring of 32 lines in power-of-two slots (32 x 1024) does not fit the BSRAM (49/46);
+options: 16 x 1024 (needs a smaller, steadier lead, i.e. the send-time patch) or 640-wide
+slots (32 x 640, ~20 blocks, address = slot*512 + slot*128).
+
 ## Paused test, to resume (2026-11-02)
 
 Baseline of the ring health on Sonic 2, from the dev PC. Before testing:
