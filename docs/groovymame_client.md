@@ -515,3 +515,21 @@ it, at link speed): fields with at least one late line = 62 % (K 8), 34 % (K 12)
 (K 16), 10 % (K 24). So on this material QOI alone does NOT make 640 RGB888 fit.
 Caveat: h264 decoding adds noise that hurts QOI; GroovyMAME's real output is cleaner.
 Next: the same measurement on lossless frames (PNG snapshots from GroovyMAME).
+
+Lossless: `~/snap/sotc.mng` (Shadow of the Colossus, MAME `-mngwrite`, 640x448, 5155 frames,
+3453 of them not near-black). MNG frames split by a chunk copier, then the same tool.
+
+| | SotC RGB888 | 4x4 RGB888 (h264) | SotC RGB565 levels |
+|---|---|---|---|
+| overall ratio | 3.59x | 2.67x | |
+| median line | 632 B | 723 B | 370 B |
+| 99 % line | 1149 B | 1061 B | 1034 B |
+| worst line | 1430 B | 1302 B | 1342 B |
+| lines over 750 B | 20 % | 43 % | 9 % |
+| fields over the whole-field budget | 473 (14 %) | 61 (3 %) | 83 (2 %) |
+| fields with a late line, lead 16 | 21 % | 25 % | 6 % |
+
+Bimodal: light scenes fit easily, heavy ones (SotC's grain/bloom) do not fit even with a
+whole field of buffering (14 % of fields are larger than what the link carries in one
+field). So 640 RGB888 with QOI alone does not hold on this game. The RGB565 column is QOI
+fed with RGB565-quantized pixels (still coded as RGB888): better, but not clean either.
