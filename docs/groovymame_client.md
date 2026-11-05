@@ -493,3 +493,25 @@ Design points to settle when it starts:
   MORE, not less;
 - client side: a GroovyMAME encoder (per line, cheap) + negotiation through GET_FEATURES
   and the CMD_INIT compression byte, without breaking stock MiSTer (which only knows 0/1).
+
+### Measured 2026-11-05: QOI per line on a PS2 capture (4x4 Evo, 640x480, RGB888)
+
+User goal: QOI and RGB888. Tool: `tools/qoi_line_size.c` (QOI state reset at every line, +2
+bytes of length per line), on `4x4.mp4` (2130 frames, h264 capture), one 240-line field per
+frame. Link budget: ~11.96 MB/s of UDP payload, minus 192 kB/s of audio, = ~750 bytes per
+15.69 kHz raster line, against 1920 bytes of raw RGB888.
+
+| Lines | Bytes per line | Ratio |
+|---|---|---|
+| all | | 2.69x |
+| median | 722 | 2.66x |
+| 90 % | 918 | 2.09x |
+| 99 % | 1060 | 1.81x |
+| worst | 1302 | 1.47x |
+
+43 % of the lines are over the per-line budget, 61 of 2130 fields over the whole-field
+budget. Beam race simulated (line i sent no earlier than K lines before the raster reaches
+it, at link speed): fields with at least one late line = 62 % (K 8), 34 % (K 12), 25 %
+(K 16), 10 % (K 24). So on this material QOI alone does NOT make 640 RGB888 fit.
+Caveat: h264 decoding adds noise that hurts QOI; GroovyMAME's real output is cleaner.
+Next: the same measurement on lossless frames (PNG snapshots from GroovyMAME).
