@@ -240,8 +240,7 @@ The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
 2. **Interlace** (item 5): did not work at all with GroovyMAME (each blit is one field,
    the FPGA waited for a whole frame and timed out). Implemented 2026-10-31 in sim;
    HW-confirmed 2026-11-01 with `gwline_mode3_240p_15k_x4_27mhz_gm_il.fs` (Sonic 2, 320x448i).
-3. **Audio crackle in the treble** with GroovyMAME: read `AU=`/`AL=` on the UART (g4ge)
-   during a run first; see `docs/groovymame_client.md`.
+3. **Audio crackle in the treble** with GroovyMAME: gone (user, 2026-11-06).
 4. **Input lag**: to measure (user).
 5. **Inputs from the board to the PC**: not possible as on MiSTer - the Dock has no USB
    host for pads. Note for users; possible alternative = arcade controls / JAMMA wired to
