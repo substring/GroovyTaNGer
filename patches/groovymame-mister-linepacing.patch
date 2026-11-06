@@ -1,4 +1,4 @@
-GroovyMAME nogpu: line pacing, each datagram sent at its raster time (-mister_linepacing 1)
+GroovyMAME nogpu: line pacing, each datagram sent at its raster time (-mister_linepacing)
 
 -mister_pacing spreads a frame with a constant BYTE rate (one raster line of raw pixels
 per line time). That matches the raster only while every line has the same size. With
@@ -8,7 +8,7 @@ far too early: on Sonic 2 in RGB565 the coded frame arrived ~200 lines ahead, th
 kept only its last 32 lines, and on flat skies (one byte = up to 62 pixels) the bytes
 came faster than any decoder at 50 MHz, so its input FIFO overflowed (seen on HW).
 
-With -mister_linepacing 1 every datagram gets its own departure time instead: t0 (the
+With -mister_linepacing every datagram gets its own departure time instead: t0 (the
 CMD_BLIT) + the raster time of the first line it carries. The fq qdisc holds it until
 then (SO_TXTIME, CLOCK_MONOTONIC, no privilege needed); sendmsg returns at once, so the
 emulation thread never waits, exactly as with -mister_pacing.

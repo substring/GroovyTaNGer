@@ -594,7 +594,7 @@ module gwline_top #(
     //   BF=frames shown incomplete, of which LF=late EF=early OF=other, cumulative
     //   (see groovy_ring_stats.v)
     //   QE=QOI lines received corrupted, QO=QOI bytes dropped (decoder FIFO full),
-    //   cumulative (groovy_qoi_rx.v; stay 0 in raw sessions)
+    //   since the last CMD_INIT, kept after CMD_CLOSE (groovy_qoi_rx.v; 0 in raw sessions)
     // =========================================================================
     // Ring health over every frame. The min/max window restarts with each UART line (the
     // request crosses from the 27 MHz UART domain as a toggle).
@@ -619,6 +619,7 @@ module gwline_top #(
     logic [15:0] qe_cnt, qo_cnt;
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) begin qe_cnt <= 16'd0;  qo_cnt <= 16'd0; end
+        else if (init_valid) begin qe_cnt <= 16'd0;  qo_cnt <= 16'd0; end   // per session
         else begin
             if (q_bad && qe_cnt != 16'hFFFF) qe_cnt <= qe_cnt + 16'd1;
             if (q_ovf && qo_cnt != 16'hFFFF) qo_cnt <= qo_cnt + 16'd1;
