@@ -183,10 +183,9 @@ The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
 ## Priorities (user, 2026-11-01) - START HERE
 
 **P1**
-1. **Clear the buffer on CMD_CLOSE**: today `video_rst` = reset | CMD_INIT | CMD_SWITCHRES
-   (`gwline_top.sv`); CMD_CLOSE does not clear the ring, so the last lines stay on screen
-   after GroovyMAME quits. Add `close_valid` (and see item 6: blank after N frames
-   without a stream).
+1. **Clear the buffer on CMD_CLOSE**: DONE, HW-confirmed 2026-11-06 (67b20fb). CMD_CLOSE
+   purges the ring (black screen, HDMI kept), and so does a stream that stops without
+   one (0.5 s without a pixel, `IDLE_PURGE`).
 2. **Our screensaver** (item 7: GroovyArcade logo when no stream is coming), after the
    ring is blanked.
 3. **Games native 640x480@60, which will necessarily be 480i here** (15 kHz CRT): to
@@ -199,16 +198,26 @@ The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
    `patches/groovymame-mister-rgb565.patch`, then `groovymame-mister-pacing.patch` (raise
    fix folded in). Still a candidate, as its own patch: ignore the desktop aspect for
    `-video mister` (the `-aspect 4:3` hack, `docs/groovymame_client.md`).
-5. **QOI compression** (item "Compression" below): our own decoder, written from the
-   public specification (no `amstan/qoi-fpga` code). Format = `docs/qoi_line_format.md`
-   (QOI per line, RGB888 and RGB565). **Done in simulation 2026-11-06**: C reference
-   `tools/qoiline/qoiline.h`, Verilog decoder `rtl/generic/compression/qoi_line_decoder.v`
-   (vendor-neutral, both MIT), GroovyMAME encoder `patches/groovymame-mister-qoi.patch`
-   (third separate patch, not run yet). Wired into gwline (`rtl/core/groovy_qoi_rx.v`,
-   UART `QE=`/`QO=`), e2e simulation passes, mode-4 bitstream built, not run on HW.
-   Next: HW test by the user; agree the CMD_INIT value with Calamity; per-line send times in GroovyMAME (pacing by
-   bytes no longer matches lines). Also what makes item 3 possible at full width (a
-   640x240 field exceeds the 100 Mbit link).
+5. **QOI compression**: WORKS ON HW 2026-11-06 (Sonic 2, RGB565, ~2.4x). Format =
+   `docs/qoi_line_format.md`; C reference `tools/qoiline/qoiline.h` + Verilog decoder
+   `rtl/generic/compression/qoi_line_decoder.v` (vendor-neutral, MIT), gwline receiver
+   `rtl/core/groovy_qoi_rx.v`; GroovyMAME `patches/groovymame-mister-qoi.patch` + the
+   new `groovymame-mister-linepacing.patch` (`-mister_linepacing`, Linux SO_TXTIME, one
+   QOI line per datagram), OS table in `patches/README.md`. Fixed on the way: LAN
+   broadcasts reached the blit (framer now filters port 32100, UART `FX=`); bad-frame
+   probe on the UART (`B0 B1 BE BL BW`: which lines, early or late).
+   Left: (a) anchor the send times on the FPGA raster (ACK) + an emulation margin, so
+   emulation jitter no longer moves the lead (remaining flashes on Sonic 2, PS2 lead
+   -128..+124); (b) agree the CMD_INIT value (2) and the other OPEN points with Calamity.
+5b. **GroovyMAME `-window` for testing** (user, 2026-11-06): a 1:1 window resized at every
+   mode change, so no PC screen is lost. Today nogpu draws no window on Linux (only the
+   Windows path has one), and windowed mode sends no CMD_SWITCHRES and no frame-delay
+   sync (the FPGA shows garbage). Its own patch.
+5c. **First pictures sometimes missing at launch** (user, not systematic): the FPGA shows a
+   complete picture 0.35 s after the first frame every time (UART), GroovyMAME starts in
+   ~0.35 s; to check with a per-frame QOI size trace whether the first frames are black.
+5d. **clk50 timing margin**: the last mode-4 build met timing at only 50.7 MHz; look at the
+   critical path before adding logic in that domain.
 
 **P2**
 6. **OSD with the Dock buttons** (items 13 and 14: information overlay, buttons, OSD).
