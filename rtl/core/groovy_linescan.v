@@ -43,7 +43,19 @@ module groovy_linescan #(
     output reg                  vs_o,
 
     output wire [15:0]          src_line,     // raster source line (host phase-lock)
-    output reg  [9:0]           good_lines    // output lines fully valid, last frame
+    output reg  [9:0]           good_lines,   // output lines fully valid, last frame
+
+    // Where and why the LAST BAD video frame was wrong (kept until the next bad frame):
+    // first and last bad source line, and how many bad output lines of each kind, judged
+    // by the tag found on the first bad pixel of the line (want = line N):
+    //   early: tag in N+1..N+63, the slot already holds a later line (N+32 overwrote N)
+    //   late:  any other line number (N-32, or the previous frame's line): N not there yet
+    //   wr:    0xFFFE / 0xFFFF, slot being rewritten at that moment / never written
+    output reg  [9:0]           bad_first,
+    output reg  [9:0]           bad_last,
+    output reg  [9:0]           bad_early,
+    output reg  [9:0]           bad_late,
+    output reg  [9:0]           bad_wr
 );
     wire [15:0] sline = (V_REPL == 1) ? vcount :
                         (V_REPL == 2) ? (vcount >> 1) :
@@ -101,18 +113,50 @@ module groovy_linescan #(
     // instead of judging the screen by eye.
     reg       line_bad;
     reg [9:0] good_cnt;
+    // kind of the line's first bad pixel: 0 late, 1 early, 2 wr
+    wire [15:0] tag_ahead = r_tag - want2;
+    wire [1:0]  kind_now  = (r_tag[15:1] == 15'h7FFF)                     ? 2'd2 :
+                            (tag_ahead != 16'd0 && tag_ahead < 16'd64)    ? 2'd1 : 2'd0;
+    reg  [1:0]  line_kind;
+    reg  [9:0]  line_src;
+    reg         f_any;
+    reg  [9:0]  f_first, f_last, f_early, f_late, f_wr;
     always @(posedge pix_clk) begin
         if (pix_rst) begin
             line_bad <= 1'b0; good_cnt <= 10'd0; good_lines <= 10'd0;
+            line_kind <= 2'd0; line_src <= 10'd0;
+            f_any <= 1'b0; f_first <= 10'd0; f_last <= 10'd0;
+            f_early <= 10'd0; f_late <= 10'd0; f_wr <= 10'd0;
+            bad_first <= 10'd0; bad_last <= 10'd0;
+            bad_early <= 10'd0; bad_late <= 10'd0; bad_wr <= 10'd0;
         end else begin
-            if (de2 && !tag_ok) line_bad <= 1'b1;
+            if (de2 && !tag_ok && !line_bad) begin        // first bad pixel of the line
+                line_bad  <= 1'b1;
+                line_kind <= kind_now;
+                line_src  <= want2[9:0];
+            end
             if (de_o && !de2) begin                       // output line just ended
                 if (!line_bad) good_cnt <= good_cnt + 10'd1;
+                else begin
+                    if (!f_any) f_first <= line_src;
+                    f_any  <= 1'b1;
+                    f_last <= line_src;
+                    case (line_kind)
+                        2'd1:    f_early <= f_early + 10'd1;
+                        2'd2:    f_wr    <= f_wr + 10'd1;
+                        default: f_late  <= f_late + 10'd1;
+                    endcase
+                end
                 line_bad <= 1'b0;
             end
             if (vframe_start) begin
                 good_lines <= good_cnt;
                 good_cnt   <= 10'd0;
+                if (f_any) begin
+                    bad_first <= f_first;  bad_last <= f_last;
+                    bad_early <= f_early;  bad_late <= f_late;  bad_wr <= f_wr;
+                end
+                f_any <= 1'b0;  f_early <= 10'd0;  f_late <= 10'd0;  f_wr <= 10'd0;
             end
         end
     end

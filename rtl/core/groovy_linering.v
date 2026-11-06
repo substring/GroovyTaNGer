@@ -70,7 +70,12 @@ module groovy_linering #(
     output wire                de_o,
     output wire                hs_o,
     output wire                vs_o,
-    output wire [9:0]          good_lines     // output lines fully valid, last video frame
+    output wire [9:0]          good_lines,    // output lines fully valid, last video frame
+    output wire [9:0]          bad_first,     // last bad video frame: see groovy_linescan.v
+    output wire [9:0]          bad_last,
+    output wire [9:0]          bad_early,
+    output wire [9:0]          bad_late,
+    output wire [9:0]          bad_wr
 );
     localparam integer LNSEL_W = $clog2(NLINES);
     localparam integer COL_W   = $clog2(LINE_W);
@@ -121,7 +126,9 @@ module groovy_linering #(
         .vframe_start(vframe_start), .frame_base(base_p2),
         .r_slot(r_slot), .r_col(r_col), .r_data(r_data), .r_tag(r_tag),
         .pix(pix), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o),
-        .src_line(src_line), .good_lines(good_lines));
+        .src_line(src_line), .good_lines(good_lines),
+        .bad_first(bad_first), .bad_last(bad_last),
+        .bad_early(bad_early), .bad_late(bad_late), .bad_wr(bad_wr));
 
     // ---- raster line -> write clock, Gray coded ----
     // src_line steps by one, so one Gray bit changes per step and a sample taken on the

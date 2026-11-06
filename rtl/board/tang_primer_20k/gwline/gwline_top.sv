@@ -447,6 +447,7 @@ module gwline_top #(
     // =========================================================================
     wire [15:0] write_line, src_line_wr, lead_top;
     wire [9:0]  good_lines;
+    wire [9:0]  bad_first, bad_last, bad_early, bad_late, bad_wr;
     wire [15:0] pix565;  wire de_o, hs_o, vs_o;
     groovy_linering #(.NLINES(NLINES), .LINE_W(LINE_W), .DATA_W(16),
                       .H_SH(HSH), .V_REPL(VREP), .DYN_H(DYN ? 1 : 0),
@@ -458,7 +459,9 @@ module gwline_top #(
         .hcount(hcount), .h_rep(r_rep), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
         .vframe_start(frame_start),
         .pix(pix565), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o),
-        .good_lines(good_lines));
+        .good_lines(good_lines),
+        .bad_first(bad_first), .bad_last(bad_last),
+        .bad_early(bad_early), .bad_late(bad_late), .bad_wr(bad_wr));
 
     // raster source line for the ACK vCount (host phase-lock feedback); already Gray-
     // synchronised into clk50m inside the ring.
@@ -479,6 +482,12 @@ module gwline_top #(
     always_ff @(posedge clk50m) begin
         gl_s1 <= good_lines;  gl_s2 <= gl_s1;
         if (gl_s1 == gl_s2) gl_50 <= gl_s2;
+    end
+    // the last bad frame's report, crossed the same way (all five change together)
+    logic [49:0] bd_s1, bd_s2, bd_50;
+    always_ff @(posedge clk50m) begin
+        bd_s1 <= {bad_first, bad_last, bad_early, bad_late, bad_wr};  bd_s2 <= bd_s1;
+        if (bd_s1 == bd_s2) bd_50 <= bd_s2;
     end
     // every output line the source covers was valid in the last video frame
     wire [15:0] src_out_h = DYN ? src_h : (src_h * VREP > OUT_H) ? OUT_H : src_h * VREP;
@@ -596,6 +605,9 @@ module gwline_top #(
     //   QE=QOI lines received corrupted, QO=QOI bytes dropped (decoder FIFO full),
     //   since the last CMD_INIT, kept after CMD_CLOSE (groovy_qoi_rx.v; 0 in raw sessions)
 //   FX=datagrams for another UDP port (LAN broadcasts) dropped, cumulative
+//   B0,B1=first and last bad source line of the LAST BAD video frame (kept until the
+//   next bad one); BE,BL,BW=its bad output lines that were early (overwritten by a later
+//   line), late (not arrived yet), mid-rewrite or never written (groovy_linescan.v)
     // =========================================================================
     // Ring health over every frame. The min/max window restarts with each UART line (the
     // request crosses from the 27 MHz UART domain as a toggle).
@@ -644,6 +656,7 @@ module gwline_top #(
     // up as one odd line in the log, nothing more)
     reg [15:0] q_fc, q_wl, q_rl, q_lt, q_gl, q_to, q_rj, q_vf, q_al, q_au;  reg q_se, q_tl;
     reg [15:0] q_ln, q_lx, q_bf, q_lf, q_ef, q_of, q_qe, q_qo, q_fx;
+    reg [15:0] q_b0, q_b1, q_be, q_bl, q_bw;
     always @(posedge clk) begin
         q_fc <= frame_cnt;  q_wl <= write_line;  q_rl <= src_line_wr;  q_lt <= lead_top;
         q_gl <= {6'd0, gl_50};  q_to <= to_cnt;  q_rj <= rj_cnt;  q_vf <= vframe_cnt;
@@ -651,6 +664,8 @@ module gwline_top #(
         q_al <= {3'd0, a_level};  q_au <= a_underruns;
         q_bf <= st_bad;  q_lf <= st_late;  q_ef <= st_early;  q_of <= st_other;
         q_qe <= qe_cnt;  q_qo <= qo_cnt;  q_fx <= fx_cnt;
+        q_b0 <= {6'd0, bd_50[49:40]};  q_b1 <= {6'd0, bd_50[39:30]};
+        q_be <= {6'd0, bd_50[29:20]};  q_bl <= {6'd0, bd_50[19:10]};  q_bw <= {6'd0, bd_50[9:0]};
         if (dbg_line_start) begin q_ln <= st_lmin;  q_lx <= st_lmax; end
     end
 
@@ -661,7 +676,7 @@ module gwline_top #(
     function [31:0] hx4; input [15:0] v;
         hx4 = {hxd(v[15:12]), hxd(v[11:8]), hxd(v[7:4]), hxd(v[3:0])};
     endfunction
-    localparam integer DBGLEN = 163;
+    localparam integer DBGLEN = 203;
     wire [8*DBGLEN-1:0] dmsg = {
         "RD=", hx4(q_fc), " WL=", hx4(q_wl), " RL=", hx4(q_rl), " LT=", hx4(q_lt),
         " GL=", hx4(q_gl), " TO=", hx4(q_to), " RJ=", hx4(q_rj), " VF=", hx4(q_vf),
@@ -669,6 +684,7 @@ module gwline_top #(
         " AL=", hx4(q_al), " AU=", hx4(q_au),
         " LN=", hx4(q_ln), " LX=", hx4(q_lx), " BF=", hx4(q_bf), " LF=", hx4(q_lf),
         " EF=", hx4(q_ef), " OF=", hx4(q_of), " QE=", hx4(q_qe), " QO=", hx4(q_qo), " FX=", hx4(q_fx),
+        " B0=", hx4(q_b0), " B1=", hx4(q_b1), " BE=", hx4(q_be), " BL=", hx4(q_bl), " BW=", hx4(q_bw),
         8'h0D, 8'h0A };
     reg [7:0] di=0, dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0;
     wire [7:0] dlb = dmsg[8*(DBGLEN-1-di) +: 8];

@@ -318,6 +318,8 @@ module gwline_modeline_tb;
         $display("QOI session %0d: corrupted lines QE=%0d, dropped bytes QO=%0d",
                  dut.cfg_qoi, dut.qe_cnt, dut.qo_cnt);
         if (dut.cfg_qoi != qoi || dut.qe_cnt != 0 || dut.qo_cnt != 0) errors = errors + 1;
+        $display("last bad frame: source lines %0d..%0d, early %0d, late %0d, wr %0d",
+                 dut.bad_first, dut.bad_last, dut.bad_early, dut.bad_late, dut.bad_wr);
         // +FX=n: the stream has n broadcasts to another port (gen --foreign), all dropped
         $display("foreign datagrams dropped FX=%0d (expected %0d)", dut.fx_cnt, fx_want);
         if (dut.fx_cnt != fx_want) errors = errors + 1;
@@ -325,6 +327,14 @@ module gwline_modeline_tb;
         else             $display("FAIL: gwline_modeline_tb (%0d errors)", errors);
         $finish;
     end
+    // every new bad-frame report while frames are streamed (first 12)
+    integer bd_shown = 0;
+    always @(dut.bad_first or dut.bad_last or dut.bad_early or dut.bad_late or dut.bad_wr)
+        if (checking && bd_shown < 12) begin
+            bd_shown = bd_shown + 1;
+            $display("  bad frame report: lines %0d..%0d, early %0d, late %0d, wr %0d",
+                     dut.bad_first, dut.bad_last, dut.bad_early, dut.bad_late, dut.bad_wr);
+        end
 endmodule
 
 `default_nettype wire
