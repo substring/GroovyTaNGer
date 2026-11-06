@@ -9,12 +9,15 @@ kept only its last 32 lines, and on flat skies (one byte = up to 62 pixels) the 
 came faster than any decoder at 50 MHz, so its input FIFO overflowed (seen on HW).
 
 With -mister_linepacing every datagram gets its own departure time instead: t0 (the
-CMD_BLIT) + the raster time of the first line it carries. The fq qdisc holds it until
+CMD_BLIT) + the raster time of the LAST line it carries, so no line arrives before its
+raster time (an early line is what overwrites the ring). The fq qdisc holds it until
 then (SO_TXTIME, CLOCK_MONOTONIC, no privilege needed); sendmsg returns at once, so the
 emulation thread never waits, exactly as with -mister_pacing.
 
-- a datagram carries at most 4 lines (MAX_LINES_PER_DGRAM), so no line of it arrives
-  more than 4 lines early (a 1472-byte datagram could otherwise hold ~50 flat lines)
+- a datagram carries at most 4 lines (MAX_LINES_PER_DGRAM), so its first line is at
+  most 3 lines late (a 1472-byte datagram could otherwise hold ~50 flat lines). HW
+  2026-11-06, first version timed by the FIRST line: QOI frames up to 33 lines early
+  on a 32-line ring, ~1 bad frame in 80; raw fine (2.3 lines per datagram)
 - works for raw and qoi (both have line boundaries); lz4 has none and is sent as before
 - every other datagram on the socket (CMD_AUDIO, next CMD_BLIT, ...) is stamped too, no
   earlier than the last one queued: fq keeps a flow sorted by send time (Linux >= 5.7),
@@ -38,8 +41,8 @@ compile with the libretro driver's release flags (g++ -std=c++20 -Wall -Werror).
 run yet.
 
 diff -ruN a/src/osd/modules/lib/osdobj_common.cpp b/src/osd/modules/lib/osdobj_common.cpp
---- a/src/osd/modules/lib/osdobj_common.cpp	2026-11-06 09:28:28.836894531 +0100
-+++ b/src/osd/modules/lib/osdobj_common.cpp	2026-11-06 09:28:28.838265620 +0100
+--- a/src/osd/modules/lib/osdobj_common.cpp	2026-11-06 09:50:15.744558623 +0100
++++ b/src/osd/modules/lib/osdobj_common.cpp	2026-11-06 09:50:15.745985928 +0100
 @@ -157,6 +157,7 @@
  	{ OSDOPTION_MISTER_INTERLACED_FB,            "1",              core_options::option_type::BOOLEAN,   "nogpu blit odd/even lines separately."},
  	{ OSDOPTION_MISTER_RGB_MODE,                 "rgb888",         core_options::option_type::STRING,    "nogpu pixel format sent over the network (rgb888, rgb565)" },
@@ -49,8 +52,8 @@ diff -ruN a/src/osd/modules/lib/osdobj_common.cpp b/src/osd/modules/lib/osdobj_c
  	{ nullptr,                                   nullptr,          core_options::option_type::HEADER,    "OSD ACCELERATED VIDEO OPTIONS" },
  	{ OSDOPTION_FILTER ";glfilter;flt",          "0",              core_options::option_type::BOOLEAN,   "use bilinear filtering when scaling emulated video" },
 diff -ruN a/src/osd/modules/lib/osdobj_common.h b/src/osd/modules/lib/osdobj_common.h
---- a/src/osd/modules/lib/osdobj_common.h	2026-11-06 09:28:28.836939254 +0100
-+++ b/src/osd/modules/lib/osdobj_common.h	2026-11-06 09:28:28.838314843 +0100
+--- a/src/osd/modules/lib/osdobj_common.h	2026-11-06 09:50:15.744622683 +0100
++++ b/src/osd/modules/lib/osdobj_common.h	2026-11-06 09:50:15.746034519 +0100
 @@ -136,6 +136,7 @@
  #define OSDOPTION_MISTER_INTERLACED_FB  "mister_interlaced_fb"
  #define OSDOPTION_MISTER_RGB_MODE       "mister_rgb_mode"
@@ -68,8 +71,8 @@ diff -ruN a/src/osd/modules/lib/osdobj_common.h b/src/osd/modules/lib/osdobj_com
  	// accelerated video options
  	bool filter() const { return bool_value(OSDOPTION_FILTER); }
 diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawnogpu.cpp
---- a/src/osd/modules/render/drawnogpu.cpp	2026-11-06 09:28:28.836807197 +0100
-+++ b/src/osd/modules/render/drawnogpu.cpp	2026-11-06 09:28:28.838176804 +0100
+--- a/src/osd/modules/render/drawnogpu.cpp	2026-11-06 09:50:15.744453275 +0100
++++ b/src/osd/modules/render/drawnogpu.cpp	2026-11-06 09:50:15.745901169 +0100
 @@ -27,6 +27,12 @@
  #include <arpa/inet.h>
  #endif
@@ -141,7 +144,7 @@ diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawno
  	osd_printf_verbose("nogpu: socket reopened on port %d\n", ntohs(local.sin_port));
  	return true;
  	#else
-@@ -936,6 +965,122 @@
+@@ -936,6 +965,131 @@
  }
  
  //============================================================
@@ -170,13 +173,16 @@ diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawno
 +//  the link allows. -mister_pacing does it with a byte rate, which only matches lines
 +//  when every line has the same size (raw). With compression a line can be 2 bytes or
 +//  a full raw line, so here every datagram gets its own departure time instead: the
-+//  raster time of the first line it carries, counted from t0 (the CMD_BLIT). The fq
++//  raster time of the lines it carries, counted from t0 (the CMD_BLIT). The fq
 +//  qdisc holds each datagram until then (SO_TXTIME); sendmsg still returns at once,
 +//  the emulation thread never waits.
 +//
-+//  A datagram is cut at MAX_LINES_PER_DGRAM lines, so its last line is never more
-+//  than that many lines early (a 1472-byte datagram can hold ~50 lines of a flat QOI
-+//  picture). buffer + m_line_offset[0..lines] describe the payload, line by line.
++//  The time is the one of the LAST line the datagram carries, so no line arrives
++//  before its raster time (the ring only overflows on lines that come too early); the
++//  first lines of a datagram are at most MAX_LINES_PER_DGRAM - 1 lines late, which
++//  the lead absorbs. A datagram is cut at MAX_LINES_PER_DGRAM lines for that reason
++//  (a 1472-byte datagram can hold ~50 lines of a flat QOI picture).
++//  buffer + m_line_offset[0..lines] describe the payload, line by line.
 +//============================================================
 +
 +#define MAX_LINES_PER_DGRAM 4
@@ -197,7 +203,13 @@ diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawno
 +
 +		const int last = std::min(line + MAX_LINES_PER_DGRAM, lines);
 +		const uint32_t stop = std::min(offset + 1472, m_line_offset[last]);
-+		nogpu_send_at(buffer + offset, stop - offset, t0_ns + (uint64_t)(line * line_ns));
++
++		// line of the datagram's last byte
++		int last_line = line;
++		while (m_line_offset[last_line + 1] < stop)
++			last_line++;
++
++		nogpu_send_at(buffer + offset, stop - offset, t0_ns + (uint64_t)(last_line * line_ns));
 +		offset = stop;
 +	}
 +	#endif
@@ -264,7 +276,7 @@ diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawno
  //  renderer_nogpu::nogpu_send_mtu
  //============================================================
  
-@@ -1032,7 +1177,11 @@
+@@ -1032,7 +1186,11 @@
  		const int fmt = m_rgb_mode == 2 ? QOILINE_RGB565 : QOILINE_RGB888;
  		const size_t line_bytes = (size_t)width * m_bpp;
  		for (int y = 0; y < height; y++)
@@ -276,7 +288,7 @@ diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawno
  	}
  
  	// Send CMD_BLIT
-@@ -1040,8 +1189,22 @@
+@@ -1040,8 +1198,22 @@
  	command.frame = frame;
  	command.vsync = video_config.syncrefresh? m_vsync_scanline : 0;
  	command.compressed_data_size = compressed_data_size;
@@ -299,7 +311,7 @@ diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawno
  	if (m_compression == 0)
  		nogpu_send_mtu(&m_fb[0], width * height * m_bpp, 1472);
  
-@@ -1094,6 +1257,10 @@
+@@ -1094,6 +1266,10 @@
  
  bool renderer_nogpu::nogpu_send_command(void *command, int command_size)
  {
