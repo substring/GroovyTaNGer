@@ -33,14 +33,18 @@ def udp_checksum(src_ip, dst_ip, src_port, dst_port, payload):
     s = ~s & 0xFFFF
     return 0xFFFF if s == 0 else s
 
-def build_udp_frame(payload, ident=0x0001):
+def build_udp_frame(payload, ident=0x0001, dst_ip=None, dst_port=None, dst_mac=None):
+    """dst_* default to the receiver (DST_IP:DST_PORT); pass others for a foreign datagram"""
+    dst_ip = DST_IP if dst_ip is None else dst_ip
+    dst_port = DST_PORT if dst_port is None else dst_port
+    dst_mac = DST_MAC if dst_mac is None else dst_mac
     udp_len = 8 + len(payload)
-    csum = udp_checksum(SRC_IP, DST_IP, SRC_PORT, DST_PORT, payload)
-    udp_hdr = struct.pack(">HHHH", SRC_PORT, DST_PORT, udp_len, csum)
+    csum = udp_checksum(SRC_IP, dst_ip, SRC_PORT, dst_port, payload)
+    udp_hdr = struct.pack(">HHHH", SRC_PORT, dst_port, udp_len, csum)
     ip_total_len = 20 + udp_len
     ip_hdr_nosum = struct.pack(">BBHHHBBH4s4s",
         0x45, 0x00, ip_total_len, ident, 0x4000, 0x40, 17, 0,
-        ip_to_bytes(SRC_IP), ip_to_bytes(DST_IP))
+        ip_to_bytes(SRC_IP), ip_to_bytes(dst_ip))
     s = 0
     for i in range(0, len(ip_hdr_nosum), 2):
         s += (ip_hdr_nosum[i] << 8) | ip_hdr_nosum[i+1]
@@ -48,8 +52,8 @@ def build_udp_frame(payload, ident=0x0001):
     ip_csum = ~s & 0xFFFF
     ip_hdr = struct.pack(">BBHHHBBH4s4s",
         0x45, 0x00, ip_total_len, ident, 0x4000, 0x40, 17, ip_csum,
-        ip_to_bytes(SRC_IP), ip_to_bytes(DST_IP))
-    eth_hdr = DST_MAC + SRC_MAC + struct.pack(">H", 0x0800)
+        ip_to_bytes(SRC_IP), ip_to_bytes(dst_ip))
+    eth_hdr = dst_mac + SRC_MAC + struct.pack(">H", 0x0800)
     frame = eth_hdr + ip_hdr + udp_hdr + payload
     if len(frame) < 60:
         frame += b"\x00" * (60 - len(frame))

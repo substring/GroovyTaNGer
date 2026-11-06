@@ -17,11 +17,19 @@
 // the old header reader, which parked until the header FIFO ran empty and would hang if
 // a second datagram had already been queued.
 //
+// PORT != 0 keeps only the datagrams sent to that UDP port. udp.sv takes every datagram
+// addressed to our IP or to 255.255.255.255 whatever its port, so a LAN broadcast (device
+// discovery, every minute or so) used to reach the parser: during a blit its bytes were
+// taken for pixels (QOI: one corrupted line, raw: the rest of the frame shifted), and it
+// also became the reply address. Other datagrams are read out and dropped (`foreign`).
+//
 // FIFO handshake (both): a word/byte is transferred on a cycle where av and rdy are both
 // high, and it is the value on the data bus during that cycle.
 `default_nettype none
 
-module groovy_udp_rx_framer (
+module groovy_udp_rx_framer #(
+    parameter [15:0] PORT = 16'd0           // only this destination port; 0 = any
+) (
     input  wire        clk,
     input  wire        rst,
 
@@ -38,37 +46,51 @@ module groovy_udp_rx_framer (
     output reg         p_eop,       // with the datagram's last byte
 
     output reg  [31:0] src_ip,      // sender of the most recent datagram (reply address)
-    output reg  [15:0] src_port
+    output reg  [15:0] src_port,
+    output reg         foreign      // pulse: a datagram for another port was dropped
 );
-    localparam [1:0] S_HEAD = 2'd0, S_DATA = 2'd1;
+    localparam [1:0] S_HEAD = 2'd0, S_DATA = 2'd1, S_SKIP = 2'd2;
     reg [1:0]  state;
     reg [1:0]  hidx;
     reg [15:0] remain;
     reg        first;
+    reg [31:0] h_ip;                // header of the datagram being read
+    reg [15:0] h_sport, h_dport;
+    wire       keep = (PORT == 16'd0) || (h_dport == PORT);
 
     assign rx_head_rdy = (state == S_HEAD);
-    assign rx_data_rdy = (state == S_DATA);
+    assign rx_data_rdy = (state == S_DATA) || (state == S_SKIP);
 
     wire take_head = rx_head_av && rx_head_rdy;
     wire take_data = rx_data_av && rx_data_rdy;
 
     always @(posedge clk) begin
-        p_valid <= 1'b0;  p_sop <= 1'b0;  p_eop <= 1'b0;
+        p_valid <= 1'b0;  p_sop <= 1'b0;  p_eop <= 1'b0;  foreign <= 1'b0;
         if (rst) begin
             state <= S_HEAD;  hidx <= 2'd0;  remain <= 16'd0;  first <= 1'b0;
             src_ip <= 32'd0;  src_port <= 16'd0;
+            h_ip <= 32'd0;  h_sport <= 16'd0;  h_dport <= 16'd0;
         end else if (take_head) begin
             hidx <= hidx + 2'd1;
             case (hidx)
-                2'd0: src_ip   <= rx_head;
-                2'd2: src_port <= rx_head[31:16];
+                2'd0: h_ip <= rx_head;
+                2'd2: begin h_sport <= rx_head[31:16];  h_dport <= rx_head[15:0]; end
                 2'd3: begin
                     remain <= rx_head[15:0];
                     first  <= 1'b1;
-                    if (rx_head[15:0] != 16'd0) state <= S_DATA;   // empty datagram: no bytes
+                    if (keep) begin
+                        src_ip <= h_ip;  src_port <= h_sport;
+                        if (rx_head[15:0] != 16'd0) state <= S_DATA;   // empty: no bytes
+                    end else begin
+                        foreign <= 1'b1;
+                        if (rx_head[15:0] != 16'd0) state <= S_SKIP;
+                    end
                 end
                 default: ;
             endcase
+        end else if (take_data && state == S_SKIP) begin
+            remain <= remain - 16'd1;
+            if (remain == 16'd1) state <= S_HEAD;
         end else if (take_data) begin
             p_valid <= 1'b1;
             p_data  <= rx_data;

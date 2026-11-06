@@ -54,6 +54,7 @@ module gwline_modeline_tb;
         else            pixq = pix(f, l, c >> 4) ^ (((c >> 2) & 3) << 5);
     endfunction
     reg qoi = 1'b0;
+    integer fx_want = 0;
     function automatic [15:0] want(input integer f, input integer l, input integer c);
         want = qoi ? pixq(f, l, c) : pix(f, l, c);
     endfunction
@@ -211,6 +212,7 @@ module gwline_modeline_tb;
         void'($value$plusargs("LEAD=%d", lead));
         void'($value$plusargs("SEGS=%d", nsegs));
         if ($test$plusargs("QOI")) qoi = 1'b1;
+        void'($value$plusargs("FX=%d", fx_want));
         $readmemh({dir, "/stream_bytes.hex"}, sbytes);
         $readmemh({dir, "/stream_idx.hex"}, sidx);
         while (nframes_eth < 4096 && sidx[nframes_eth] !== 64'hx && sidx[nframes_eth][55:32] != 0)
@@ -285,9 +287,14 @@ module gwline_modeline_tb;
                 wait_until(t_next - (lead + 1) * lt);
                 send_eth(i);  i = i + 1;                       // CMD_BLIT_VSYNC header
                 d = 0;
-                while (i < nframes_eth && sidx[i][63:56] == 8'd2) begin
-                    wait_until(t_next + (d - lead) * lt);
-                    send_eth(i);  i = i + 1;  d = d + 1;
+                // kind 2 = one line of pixels, at its line time; kind 4 = a foreign
+                // datagram (gen --foreign), sent right after the line before it
+                while (i < nframes_eth && (sidx[i][63:56] == 8'd2 || sidx[i][63:56] == 8'd4)) begin
+                    if (sidx[i][63:56] == 8'd2) begin
+                        wait_until(t_next + (d - lead) * lt);
+                        d = d + 1;
+                    end
+                    send_eth(i);  i = i + 1;
                 end
             end
             repeat (2) @(posedge dut.frame_start);
@@ -311,6 +318,9 @@ module gwline_modeline_tb;
         $display("QOI session %0d: corrupted lines QE=%0d, dropped bytes QO=%0d",
                  dut.cfg_qoi, dut.qe_cnt, dut.qo_cnt);
         if (dut.cfg_qoi != qoi || dut.qe_cnt != 0 || dut.qo_cnt != 0) errors = errors + 1;
+        // +FX=n: the stream has n broadcasts to another port (gen --foreign), all dropped
+        $display("foreign datagrams dropped FX=%0d (expected %0d)", dut.fx_cnt, fx_want);
+        if (dut.fx_cnt != fx_want) errors = errors + 1;
         if (errors == 0) $display("PASS: gwline_modeline_tb");
         else             $display("FAIL: gwline_modeline_tb (%0d errors)", errors);
         $finish;

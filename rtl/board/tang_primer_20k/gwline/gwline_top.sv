@@ -146,13 +146,13 @@ module gwline_top #(
     // CMD_BLIT header of every frame after the first.
     wire        p_valid, p_sop, p_eop, rx_data_rdy;
     wire [7:0]  p_data;
-    wire [31:0] req_ip;  wire [15:0] req_port;
-    groovy_udp_rx_framer u_framer (
+    wire [31:0] req_ip;  wire [15:0] req_port;  wire foreign;
+    groovy_udp_rx_framer #(.PORT(OUR_PORT)) u_framer (
         .clk(clk50m), .rst(core_rst),
         .rx_head_av(rx_head_av), .rx_head(rx_head), .rx_head_rdy(rx_head_rdy),
         .rx_data_av(rx_data_av), .rx_data(rx_data), .rx_data_rdy(rx_data_rdy),
         .p_valid(p_valid), .p_data(p_data), .p_sop(p_sop), .p_eop(p_eop),
-        .src_ip(req_ip), .src_port(req_port));
+        .src_ip(req_ip), .src_port(req_port), .foreign(foreign));
 
     wire        init_valid, close_valid, get_status_valid, blit_valid;
     wire        get_features_valid, get_switchres_valid, switchres_valid, session_active;
@@ -595,6 +595,7 @@ module gwline_top #(
     //   (see groovy_ring_stats.v)
     //   QE=QOI lines received corrupted, QO=QOI bytes dropped (decoder FIFO full),
     //   since the last CMD_INIT, kept after CMD_CLOSE (groovy_qoi_rx.v; 0 in raw sessions)
+//   FX=datagrams for another UDP port (LAN broadcasts) dropped, cumulative
     // =========================================================================
     // Ring health over every frame. The min/max window restarts with each UART line (the
     // request crosses from the 27 MHz UART domain as a toggle).
@@ -616,6 +617,12 @@ module gwline_top #(
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) frame_cnt <= 16'd0; else if (frame_done) frame_cnt <= frame_cnt + 16'd1;
 
+    // datagrams for another UDP port (LAN broadcasts), dropped by the framer; cumulative
+    logic [15:0] fx_cnt;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) fx_cnt <= 16'd0;
+        else if (foreign && fx_cnt != 16'hFFFF) fx_cnt <= fx_cnt + 16'd1;
+
     logic [15:0] qe_cnt, qo_cnt;
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) begin qe_cnt <= 16'd0;  qo_cnt <= 16'd0; end
@@ -636,14 +643,14 @@ module gwline_top #(
     // snapshot into the 27 MHz UART domain (debug only: a value caught mid-change shows
     // up as one odd line in the log, nothing more)
     reg [15:0] q_fc, q_wl, q_rl, q_lt, q_gl, q_to, q_rj, q_vf, q_al, q_au;  reg q_se, q_tl;
-    reg [15:0] q_ln, q_lx, q_bf, q_lf, q_ef, q_of, q_qe, q_qo;
+    reg [15:0] q_ln, q_lx, q_bf, q_lf, q_ef, q_of, q_qe, q_qo, q_fx;
     always @(posedge clk) begin
         q_fc <= frame_cnt;  q_wl <= write_line;  q_rl <= src_line_wr;  q_lt <= lead_top;
         q_gl <= {6'd0, gl_50};  q_to <= to_cnt;  q_rj <= rj_cnt;  q_vf <= vframe_cnt;
         q_se <= rx_seen;  q_tl <= tmds_lock_sync[1];
         q_al <= {3'd0, a_level};  q_au <= a_underruns;
         q_bf <= st_bad;  q_lf <= st_late;  q_ef <= st_early;  q_of <= st_other;
-        q_qe <= qe_cnt;  q_qo <= qo_cnt;
+        q_qe <= qe_cnt;  q_qo <= qo_cnt;  q_fx <= fx_cnt;
         if (dbg_line_start) begin q_ln <= st_lmin;  q_lx <= st_lmax; end
     end
 
@@ -654,14 +661,14 @@ module gwline_top #(
     function [31:0] hx4; input [15:0] v;
         hx4 = {hxd(v[15:12]), hxd(v[11:8]), hxd(v[7:4]), hxd(v[3:0])};
     endfunction
-    localparam integer DBGLEN = 155;
+    localparam integer DBGLEN = 163;
     wire [8*DBGLEN-1:0] dmsg = {
         "RD=", hx4(q_fc), " WL=", hx4(q_wl), " RL=", hx4(q_rl), " LT=", hx4(q_lt),
         " GL=", hx4(q_gl), " TO=", hx4(q_to), " RJ=", hx4(q_rj), " VF=", hx4(q_vf),
         " SE=", hxd({3'b0, q_se}), " TL=", hxd({3'b0, q_tl}),
         " AL=", hx4(q_al), " AU=", hx4(q_au),
         " LN=", hx4(q_ln), " LX=", hx4(q_lx), " BF=", hx4(q_bf), " LF=", hx4(q_lf),
-        " EF=", hx4(q_ef), " OF=", hx4(q_of), " QE=", hx4(q_qe), " QO=", hx4(q_qo),
+        " EF=", hx4(q_ef), " OF=", hx4(q_of), " QE=", hx4(q_qe), " QO=", hx4(q_qo), " FX=", hx4(q_fx),
         8'h0D, 8'h0A };
     reg [7:0] di=0, dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0;
     wire [7:0] dlb = dmsg[8*(DBGLEN-1-di) +: 8];

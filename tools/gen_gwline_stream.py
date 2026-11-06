@@ -109,6 +109,9 @@ def main():
     p.add_argument("--status-burst", dest="status_burst", type=int, default=0,
                    help="CMD_GET_STATUS requests sent back to back after each frame")
     p.add_argument("--modes", default="")
+    p.add_argument("--foreign", type=int, default=0,
+                   help="with --modes: a LAN broadcast to another UDP port (255.255.255.255:1900) "
+                        "after every N pixel datagrams; the receiver must drop it")
     p.add_argument("--qoi", action="store_true",
                    help="with --modes: QOI per line (CMD_INIT compression 2), pixq() pixels")
     a = p.parse_args()
@@ -187,6 +190,14 @@ def modes_stream(a):
     frames = [(5, build_arp_request()),
               (0, build_udp_frame(bytes([2, 2 if a.qoi else 0, 0, 2, 2])))]
     encode = qoi_lib() if a.qoi else None
+    nfx = [0, 0]                                  # pixel datagrams, foreign datagrams
+    def pixels(payload):
+        frames.append((2, build_udp_frame(payload)))
+        nfx[0] += 1
+        if a.foreign and nfx[0] % a.foreign == 0:
+            frames.append((4, build_udp_frame(b"M-SEARCH * HTTP/1.1\r\n" + bytes(40),
+                           dst_ip="255.255.255.255", dst_port=1900, dst_mac=b"\xff" * 6)))
+            nfx[1] += 1
     f = 0
     coded_total = raw_total = 0
     for seg in a.modes.split(";"):
@@ -204,16 +215,17 @@ def modes_stream(a):
                 coded_total += size;  raw_total += 2 * ha * h
                 frames.append((1, build_udp_frame(struct.pack("<BIHI", 6, f, 0, size))))
                 for l0 in range(0, h, a.lines_per_dgram):
-                    frames.append((2, build_udp_frame(b"".join(coded[l0:l0 + a.lines_per_dgram]))))
+                    pixels(b"".join(coded[l0:l0 + a.lines_per_dgram]))
                 continue
             frames.append((1, build_udp_frame(struct.pack("<BIHI", 6, f, 0, 0))))
             for l0 in range(0, h, a.lines_per_dgram):
-                frames.append((2, build_udp_frame(b"".join(
+                pixels(b"".join(
                     struct.pack("<H", pix(f - 1, l, c))
-                    for l in range(l0, min(l0 + a.lines_per_dgram, h)) for c in range(ha)))))
+                    for l in range(l0, min(l0 + a.lines_per_dgram, h)) for c in range(ha)))
     off = write_stream(a.outdir, frames)
     print(f"{len(frames)} ethernet frames, {off} bytes, {f} network frames, modes {a.modes}"
-          + (f", QOI {raw_total} -> {coded_total} bytes" if a.qoi else ""))
+          + (f", QOI {raw_total} -> {coded_total} bytes" if a.qoi else "")
+          + (f", {nfx[1]} foreign broadcasts" if a.foreign else ""))
 
 if __name__ == "__main__":
     main()
