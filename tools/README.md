@@ -35,6 +35,17 @@ validation rung. No build step.
 ./gm_test_sender.py --host <ip> blit --frame 1 --field 0 --vsync 0
 ```
 
+## `qoiline/` — QOI per line (C reference)
+
+`qoiline.h` is the single-header encoder/decoder of `docs/qoi_line_format.md` (MIT), used by
+`patches/groovymame-mister-qoi.patch` (a copy) and as the golden model of
+`rtl/generic/compression/qoi_line_decoder.v`. `make qoiline_test qoi_line_decoder_tb` runs
+its self-test and the Verilog bench. `qoiline_size.c` prints the coded size of every line
+of raw RGB24 frames, in RGB888 or RGB565:
+
+    gcc -O2 -o qoiline_size tools/qoiline/qoiline_size.c tools/qoiline/qoiline.c
+    ffmpeg -i in.mp4 -an -f rawvideo -pix_fmt rgb24 - | ./qoiline_size 320 224 565
+
 ## Status
 Both build/run and emit correct on-wire bytes (verified locally). **Not yet
 tested against a live receiver** — that happens when a MiSTer or the Groovy_Tang

@@ -199,10 +199,16 @@ The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
    `patches/groovymame-mister-rgb565.patch`, then `groovymame-mister-pacing.patch` (raise
    fix folded in). Still a candidate, as its own patch: ignore the desktop aspect for
    `-video mister` (the `-aspect 4:3` hack, `docs/groovymame_client.md`).
-5. **QOI compression** (item "Compression" below, design notes and licence question in
-   `docs/groovymame_client.md`): `amstan/qoi-fpga` has no licence on its Verilog, so ask
-   the author for one or write our own decoder from the public specification. Also what
-   makes item 3 possible at full width (a 640x240 field exceeds the 100 Mbit link).
+5. **QOI compression** (item "Compression" below): our own decoder, written from the
+   public specification (no `amstan/qoi-fpga` code). Format = `docs/qoi_line_format.md`
+   (QOI per line, RGB888 and RGB565). **Done in simulation 2026-11-06**: C reference
+   `tools/qoiline/qoiline.h`, Verilog decoder `rtl/generic/compression/qoi_line_decoder.v`
+   (vendor-neutral, both MIT), GroovyMAME encoder `patches/groovymame-mister-qoi.patch`
+   (third separate patch, not run yet). Next: wire the decoder into gwline (CMD_INIT
+   compression 2, frame end by coded bytes), e2e simulation, then a bitstream for the user;
+   agree the CMD_INIT value with Calamity; per-line send times in GroovyMAME (pacing by
+   bytes no longer matches lines). Also what makes item 3 possible at full width (a
+   640x240 field exceeds the 100 Mbit link).
 
 **P2**
 6. **OSD with the Dock buttons** (items 13 and 14: information overlay, buttons, OSD).
