@@ -1,0 +1,312 @@
+GroovyMAME nogpu: line pacing, each datagram sent at its raster time (-mister_linepacing 1)
+
+-mister_pacing spreads a frame with a constant BYTE rate (one raster line of raw pixels
+per line time). That matches the raster only while every line has the same size. With
+-mister_compression qoi a flat line is a few bytes and a detailed one a full raw line, so
+a beam-racing receiver (Groovy_TaNGer: a 32-line ring) gets the flat parts of the picture
+far too early: on Sonic 2 in RGB565 the coded frame arrived ~200 lines ahead, the ring
+kept only its last 32 lines, and on flat skies (one byte = up to 62 pixels) the bytes
+came faster than any decoder at 50 MHz, so its input FIFO overflowed (seen on HW).
+
+With -mister_linepacing 1 every datagram gets its own departure time instead: t0 (the
+CMD_BLIT) + the raster time of the first line it carries. The fq qdisc holds it until
+then (SO_TXTIME, CLOCK_MONOTONIC, no privilege needed); sendmsg returns at once, so the
+emulation thread never waits, exactly as with -mister_pacing.
+
+- a datagram carries at most 4 lines (MAX_LINES_PER_DGRAM), so no line of it arrives
+  more than 4 lines early (a 1472-byte datagram could otherwise hold ~50 flat lines)
+- works for raw and qoi (both have line boundaries); lz4 has none and is sent as before
+- every other datagram on the socket (CMD_AUDIO, next CMD_BLIT, ...) is stamped too, no
+  earlier than the last one queued: fq keeps a flow sorted by send time (Linux >= 5.7),
+  and an unstamped datagram would overtake the waiting pixels and land in the middle
+  of the blit payload
+- replaces -mister_pacing (ignored, with a message, when both are given)
+- not Linux, or SO_TXTIME refused: "line pacing not supported", sent as before
+
+Linux only. The interface must use the fq qdisc, like -mister_pacing: other qdiscs
+(fq_codel, the default) accept SO_TXTIME and silently ignore it. A raw 320x240 frame is
+~105 datagrams queued at once, more than fq's default flow_limit of 100:
+  tc qdisc replace dev <if> root fq flow_limit 1000
+
+Depends on: groovymame-mister-rgb565.patch, groovymame-mister-pacing.patch and
+groovymame-mister-qoi.patch (it uses their m_bpp, m_pacing and m_fb_qoi).
+Base: substring/GroovyMAME 4ce01b9 (libretro-driver) + rgb565 + pacing + qoi.
+Apply with
+  git apply -p1 groovymame-mister-linepacing.patch
+Checked: applies on that base; drawnogpu.cpp and osdobj_common.cpp pass a syntax-only
+compile with the libretro driver's release flags (g++ -std=c++20 -Wall -Werror). NOT
+run yet.
+
+diff -ruN a/src/osd/modules/lib/osdobj_common.cpp b/src/osd/modules/lib/osdobj_common.cpp
+--- a/src/osd/modules/lib/osdobj_common.cpp	2026-11-06 09:28:28.836894531 +0100
++++ b/src/osd/modules/lib/osdobj_common.cpp	2026-11-06 09:28:28.838265620 +0100
+@@ -157,6 +157,7 @@
+ 	{ OSDOPTION_MISTER_INTERLACED_FB,            "1",              core_options::option_type::BOOLEAN,   "nogpu blit odd/even lines separately."},
+ 	{ OSDOPTION_MISTER_RGB_MODE,                 "rgb888",         core_options::option_type::STRING,    "nogpu pixel format sent over the network (rgb888, rgb565)" },
+ 	{ OSDOPTION_MISTER_PACING,                   "0",              core_options::option_type::FLOAT,     "nogpu: send each frame at this multiple of the raster line rate instead of one burst (Linux, needs the fq qdisc); 0 = off"},
++	{ OSDOPTION_MISTER_LINEPACING,               "0",              core_options::option_type::BOOLEAN,   "nogpu: send each datagram at the raster time of its lines, for any compression (Linux, needs the fq qdisc); replaces mister_pacing"},
+ 
+ 	{ nullptr,                                   nullptr,          core_options::option_type::HEADER,    "OSD ACCELERATED VIDEO OPTIONS" },
+ 	{ OSDOPTION_FILTER ";glfilter;flt",          "0",              core_options::option_type::BOOLEAN,   "use bilinear filtering when scaling emulated video" },
+diff -ruN a/src/osd/modules/lib/osdobj_common.h b/src/osd/modules/lib/osdobj_common.h
+--- a/src/osd/modules/lib/osdobj_common.h	2026-11-06 09:28:28.836939254 +0100
++++ b/src/osd/modules/lib/osdobj_common.h	2026-11-06 09:28:28.838314843 +0100
+@@ -136,6 +136,7 @@
+ #define OSDOPTION_MISTER_INTERLACED_FB  "mister_interlaced_fb"
+ #define OSDOPTION_MISTER_RGB_MODE       "mister_rgb_mode"
+ #define OSDOPTION_MISTER_PACING         "mister_pacing"
++#define OSDOPTION_MISTER_LINEPACING     "mister_linepacing"
+ 
+ #define OSDOPTVAL_AUTO                  "auto"
+ #define OSDOPTVAL_NONE                  "none"
+@@ -227,6 +228,7 @@
+ 	bool mister_interlaced_fb() const { return bool_value(OSDOPTION_MISTER_INTERLACED_FB); }
+ 	const char *mister_rgb_mode() const { return value(OSDOPTION_MISTER_RGB_MODE); }
+ 	float mister_pacing() const { return float_value(OSDOPTION_MISTER_PACING); }
++	bool mister_linepacing() const { return bool_value(OSDOPTION_MISTER_LINEPACING); }
+ 
+ 	// accelerated video options
+ 	bool filter() const { return bool_value(OSDOPTION_FILTER); }
+diff -ruN a/src/osd/modules/render/drawnogpu.cpp b/src/osd/modules/render/drawnogpu.cpp
+--- a/src/osd/modules/render/drawnogpu.cpp	2026-11-06 09:28:28.836807197 +0100
++++ b/src/osd/modules/render/drawnogpu.cpp	2026-11-06 09:28:28.838176804 +0100
+@@ -27,6 +27,12 @@
+ #include <arpa/inet.h>
+ #endif
+ 
++#if defined(__linux__)
++#include <time.h>
++#include <sys/uio.h>
++#include <linux/net_tstamp.h>	// struct sock_txtime
++#endif
++
+ // MAMEOS headers
+ #if defined(OSD_WINDOWS)
+ #include "winmain.h"
+@@ -190,6 +196,8 @@
+ 	int m_bpp = 3;		// bytes per pixel on the wire
+ 	double m_pacing = 0.0;	// kernel pacing, multiple of the raster line rate (0 = off)
+ 	uint32_t m_pacing_rate = 0;	// rate set on the socket, bytes/s (0 = none yet)
++	bool m_linepacing = false;	// per-datagram send times (SO_TXTIME), see nogpu_send_lines
++	uint64_t m_last_txtime = 0;	// latest send time given to a datagram, CLOCK_MONOTONIC ns
+ 	bool m_show_window = false;
+ 	bool m_is_internal_fe = false;
+ 	bool m_autofilter = false;
+@@ -229,6 +237,7 @@
+ 	char m_fb[MAX_BUFFER_HEIGHT * MAX_BUFFER_WIDTH * 3];
+ 	char m_fb_compressed[LZ4_COMPRESSBOUND(MAX_BUFFER_HEIGHT * MAX_BUFFER_WIDTH * 3)];
+ 	uint8_t m_fb_qoi[MAX_BUFFER_HEIGHT * (MAX_BUFFER_WIDTH * 3 + 2)];	// worst case: every line raw + its header
++	uint32_t m_line_offset[MAX_BUFFER_HEIGHT + 1];	// where each line starts in the blit payload
+ 	char inp_buf[2][MAX_LZ4_BLOCK + 1];
+ 	uint16_t m_ab[MAX_SAMPLE_RATE / STREAMS_UPDATE_FREQUENCY * 2];
+ 
+@@ -238,6 +247,10 @@
+ 	bool nogpu_reopen_socket();
+ 	void nogpu_blit(uint32_t frame, uint16_t vsync, uint16_t line_width);
+ 	void nogpu_send_mtu(char *buffer, int bytes_to_send, int chunk_max_size);
++	bool nogpu_set_txtime();
++	void nogpu_send_lines(const char *buffer, int lines, uint64_t t0_ns);
++	uint64_t nogpu_txtime_now();
++	bool nogpu_send_at(const char *buffer, int size, uint64_t txtime);
+ 	//void nogpu_send_lz4(char *buffer, int bytes_to_send, int block_size);
+ 	int nogpu_compress(int id_compress, char *buffer_comp, const char *buffer_rgb, uint32_t buffer_size);
+ 	bool nogpu_wait_ack(double timeout);
+@@ -588,6 +601,20 @@
+ 		m_pacing = 0.0;
+ 	#endif
+ 
++	m_linepacing = options.mister_linepacing();
++	if (m_linepacing && !nogpu_set_txtime())
++	{
++		osd_printf_verbose("nogpu: line pacing not supported on this platform\n");
++		m_linepacing = false;
++	}
++	if (m_linepacing)
++	{
++		if (m_pacing > 0.0)
++			osd_printf_verbose("nogpu: line pacing replaces pacing, mister_pacing ignored\n");
++		m_pacing = 0.0;
++		osd_printf_verbose("nogpu: line pacing on (SO_TXTIME)\n");
++	}
++
+ 	m_rgb_mode = 0; // RGB888
+ 	m_bpp = 3;
+ 	const char* rgb_mode = options.mister_rgb_mode();
+@@ -679,6 +706,8 @@
+ 
+ 	int opt_val = SEND_BIFFER_SIZE;
+ 	setsockopt(m_sockfd, SOL_SOCKET, SO_SNDBUF, (char*)&opt_val, sizeof(opt_val));
++	if (m_linepacing)
++		nogpu_set_txtime();
+ 	osd_printf_verbose("nogpu: socket reopened on port %d\n", ntohs(local.sin_port));
+ 	return true;
+ 	#else
+@@ -936,6 +965,122 @@
+ }
+ 
+ //============================================================
++//  renderer_nogpu::nogpu_set_txtime
++//  (Linux) lets every datagram carry its own departure time
++//============================================================
++
++bool renderer_nogpu::nogpu_set_txtime()
++{
++	#if defined(__linux__) && defined(SO_TXTIME)
++	// CLOCK_MONOTONIC is the clock fq schedules with, and needs no privilege
++	sock_txtime txtime = {};
++	txtime.clockid = CLOCK_MONOTONIC;
++	txtime.flags = 0;
++	return setsockopt(m_sockfd, SOL_SOCKET, SO_TXTIME, &txtime, sizeof(txtime)) == 0;
++	#else
++	return false;
++	#endif
++}
++
++//============================================================
++//  renderer_nogpu::nogpu_send_lines
++//
++//  Line pacing: a receiver that races the beam with a small line ring (Groovy_TaNGer:
++//  32 lines) must get every line close to the raster's time for it, not as early as
++//  the link allows. -mister_pacing does it with a byte rate, which only matches lines
++//  when every line has the same size (raw). With compression a line can be 2 bytes or
++//  a full raw line, so here every datagram gets its own departure time instead: the
++//  raster time of the first line it carries, counted from t0 (the CMD_BLIT). The fq
++//  qdisc holds each datagram until then (SO_TXTIME); sendmsg still returns at once,
++//  the emulation thread never waits.
++//
++//  A datagram is cut at MAX_LINES_PER_DGRAM lines, so its last line is never more
++//  than that many lines early (a 1472-byte datagram can hold ~50 lines of a flat QOI
++//  picture). buffer + m_line_offset[0..lines] describe the payload, line by line.
++//============================================================
++
++#define MAX_LINES_PER_DGRAM 4
++
++void renderer_nogpu::nogpu_send_lines(const char *buffer, int lines, uint64_t t0_ns)
++{
++	#if defined(__linux__) && defined(SO_TXTIME)
++	const uint32_t end = m_line_offset[lines];
++	const double line_ns = m_line_period * 1000000.0;
++	uint32_t offset = 0;
++	int line = 0;
++
++	while (offset < end)
++	{
++		// first line of this datagram: the one that holds its first byte
++		while (m_line_offset[line + 1] <= offset)
++			line++;
++
++		const int last = std::min(line + MAX_LINES_PER_DGRAM, lines);
++		const uint32_t stop = std::min(offset + 1472, m_line_offset[last]);
++		nogpu_send_at(buffer + offset, stop - offset, t0_ns + (uint64_t)(line * line_ns));
++		offset = stop;
++	}
++	#endif
++}
++
++//============================================================
++//  renderer_nogpu::nogpu_txtime_now
++//  the earliest send time a datagram may get without overtaking one already queued:
++//  fq keeps each flow sorted by send time (Linux >= 5.7), so a datagram stamped "now"
++//  (CMD_AUDIO, the next CMD_BLIT...) would pass the pixel datagrams still waiting and
++//  land in the middle of the blit payload
++//============================================================
++
++uint64_t renderer_nogpu::nogpu_txtime_now()
++{
++	#if defined(__linux__)
++	timespec ts;
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++	return std::max(now, m_last_txtime);
++	#else
++	return 0;
++	#endif
++}
++
++//============================================================
++//  renderer_nogpu::nogpu_send_at
++//  (Linux, line pacing) one datagram that fq releases at txtime (CLOCK_MONOTONIC ns)
++//============================================================
++
++bool renderer_nogpu::nogpu_send_at(const char *buffer, int size, uint64_t txtime)
++{
++	#if defined(__linux__) && defined(SO_TXTIME)
++	txtime = std::max(txtime, m_last_txtime);	// never before a datagram already queued
++	m_last_txtime = txtime;
++
++	iovec iov = { (void *)buffer, (size_t)size };
++	char control[CMSG_SPACE(sizeof(uint64_t))] = {};
++	msghdr msg = {};
++	msg.msg_name = &m_server_addr;
++	msg.msg_namelen = sizeof(m_server_addr);
++	msg.msg_iov = &iov;
++	msg.msg_iovlen = 1;
++	msg.msg_control = control;
++	msg.msg_controllen = sizeof(control);
++	cmsghdr *cm = CMSG_FIRSTHDR(&msg);
++	cm->cmsg_level = SOL_SOCKET;
++	cm->cmsg_type = SCM_TXTIME;
++	cm->cmsg_len = CMSG_LEN(sizeof(uint64_t));
++	memcpy(CMSG_DATA(cm), &txtime, sizeof(txtime));
++
++	if (sendmsg(m_sockfd, &msg, 0) < 0)
++	{
++		osd_printf_verbose("nogpu_send_at failed.\n");
++		return false;
++	}
++	return true;
++	#else
++	return false;
++	#endif
++}
++
++//============================================================
+ //  renderer_nogpu::nogpu_send_mtu
+ //============================================================
+ 
+@@ -1032,7 +1177,11 @@
+ 		const int fmt = m_rgb_mode == 2 ? QOILINE_RGB565 : QOILINE_RGB888;
+ 		const size_t line_bytes = (size_t)width * m_bpp;
+ 		for (int y = 0; y < height; y++)
++		{
++			m_line_offset[y] = compressed_data_size;
+ 			compressed_data_size += qoiline_encode((const uint8_t *)&m_fb[y * line_bytes], width, fmt, &m_fb_qoi[compressed_data_size]);
++		}
++		m_line_offset[height] = compressed_data_size;
+ 	}
+ 
+ 	// Send CMD_BLIT
+@@ -1040,8 +1189,22 @@
+ 	command.frame = frame;
+ 	command.vsync = video_config.syncrefresh? m_vsync_scanline : 0;
+ 	command.compressed_data_size = compressed_data_size;
++
++	// line pacing: times from the CMD_BLIT on (lz4 has no line boundaries: not paced)
++	const uint64_t t0_ns = m_linepacing ? nogpu_txtime_now() : 0;
+ 	nogpu_send_command(&command, sizeof(command));
+ 
++	#if defined(__linux__)
++	if (m_linepacing && (m_compression == 0 || m_compression == 3))
++	{
++		if (m_compression == 0)
++			for (int y = 0; y <= height; y++)
++				m_line_offset[y] = (uint32_t)y * width * m_bpp;
++		nogpu_send_lines(m_compression == 0 ? &m_fb[0] : (const char *)&m_fb_qoi[0], height, t0_ns);
++		return;
++	}
++	#endif
++
+ 	if (m_compression == 0)
+ 		nogpu_send_mtu(&m_fb[0], width * height * m_bpp, 1472);
+ 
+@@ -1094,6 +1257,10 @@
+ 
+ bool renderer_nogpu::nogpu_send_command(void *command, int command_size)
+ {
++	// line pacing: every datagram in send-time order, after the ones already queued
++	if (m_linepacing)
++		return nogpu_send_at((const char *)command, command_size, nogpu_txtime_now());
++
+ 	int rc = sendto(m_sockfd, (char *)command, command_size, 0, (sockaddr*)&m_server_addr, sizeof(m_server_addr));
+ 
+ 	if (rc < 0)

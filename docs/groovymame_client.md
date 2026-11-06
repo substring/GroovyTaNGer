@@ -49,7 +49,7 @@ the 32-line ring - see "The real constraint" below.
 The renderer is called **`mister`**, not `nogpu` (`osd_module(OSD_RENDERER_PROVIDER,
 "mister")`); `-video nogpu` falls back to `auto` without an error.
 
-## Two client patches (in `patches/`, for the user's fork substring/GroovyMAME)
+## Client patches (in `patches/`, for the user's fork substring/GroovyMAME; OS compatibility: `patches/README.md`)
 
 Apply in this order, on 4ce01b9 (`libretro-driver`):
 

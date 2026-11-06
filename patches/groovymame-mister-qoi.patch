@@ -24,7 +24,7 @@ console measured yet); a line is never more than 2 bytes over raw.
 
 Not in this patch: with QOI the lines no longer have the same size, so constant-rate
 pacing (-mister_pacing) sends light lines early and heavy ones late; a beam-racing
-receiver needs each line sent at its raster time (planned separate patch).
+receiver needs each line sent at its raster time: groovymame-mister-linepacing.patch.
 
 Depends on: groovymame-mister-rgb565.patch (m_bpp / m_rgb_mode come from it). Applies
 with or without groovymame-mister-pacing.patch.
