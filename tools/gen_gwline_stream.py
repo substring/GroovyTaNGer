@@ -40,6 +40,12 @@
 # --frames frames; a frame of an interlaced segment (il != 0) is one FIELD of va/2 lines.
 # Pixel datagrams hold --lines-per-dgram whole lines so the bench can pace them at the
 # raster's line rate. Frame numbers (and pix()'s f) run on across segments.
+#
+# --qoi (with --modes): the session asks for QOI per line (CMD_INIT compression 2,
+# docs/qoi_line_format.md): each line is coded by the C reference (tools/qoiline,
+# built here into a shared library), CMD_BLIT carries the coded size, and a pixel
+# datagram holds --lines-per-dgram coded lines. The pixels are pixq(), which
+# compresses (runs, small steps, repeats); the bench checks them with +QOI.
 import argparse, os, struct
 import zlib
 from gen_gwline_frames import (build_udp_frame, cmd_init, cmd_blit_field_vsync,
@@ -56,6 +62,29 @@ def build_arp_request():
 
 def pix(f, l, c):
     return ((l * 0x9E37) ^ (c * 0x7F4B) ^ (f * 0x1D2F) ^ 0x5A5A) & 0xFFFF
+
+def pixq(f, l, c):
+    # --qoi picture: pix() per 16-column block, the green low bits stepping 0..3 every 4
+    # columns (QOI runs, diffs, cache hits); every 8th line is pix() itself (raw lines).
+    # Keep in sync with the testbench.
+    if l % 8 == 7:
+        return pix(f, l, c)
+    return pix(f, l, c >> 4) ^ (((c >> 2) & 3) << 5)
+
+def qoi_lib():
+    import ctypes, subprocess, tempfile
+    here = os.path.dirname(os.path.abspath(__file__))
+    so = os.path.join(tempfile.mkdtemp(), "libqoiline.so")
+    subprocess.run(["gcc", "-O2", "-shared", "-fPIC", "-o", so,
+                    os.path.join(here, "qoiline", "qoiline.c")], check=True)
+    lib = ctypes.CDLL(so)
+    lib.qoiline_encode.restype = ctypes.c_size_t
+    lib.qoiline_encode.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.c_char_p]
+    def encode(line, width, fmt):
+        out = ctypes.create_string_buffer(2 + len(line))
+        n = lib.qoiline_encode(bytes(line), width, fmt, out)
+        return out.raw[:n]
+    return encode
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
@@ -80,6 +109,8 @@ def main():
     p.add_argument("--status-burst", dest="status_burst", type=int, default=0,
                    help="CMD_GET_STATUS requests sent back to back after each frame")
     p.add_argument("--modes", default="")
+    p.add_argument("--qoi", action="store_true",
+                   help="with --modes: QOI per line (CMD_INIT compression 2), pixq() pixels")
     a = p.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     if a.modes:
@@ -153,8 +184,11 @@ def write_stream(outdir, frames):
     return off
 
 def modes_stream(a):
-    frames = [(5, build_arp_request()), (0, build_udp_frame(bytes([2, 0, 0, 2, 2])))]
+    frames = [(5, build_arp_request()),
+              (0, build_udp_frame(bytes([2, 2 if a.qoi else 0, 0, 2, 2])))]
+    encode = qoi_lib() if a.qoi else None
     f = 0
+    coded_total = raw_total = 0
     for seg in a.modes.split(";"):
         v = seg.split(",")
         pclk = float(v[0]);  ha, hb, he, ht, va, vb, ve, vt, il = (int(x) for x in v[1:])
@@ -163,13 +197,23 @@ def modes_stream(a):
         h = va // 2 if il else va
         for _ in range(a.frames):
             f += 1
+            if a.qoi:
+                coded = [encode(b"".join(struct.pack("<H", pixq(f - 1, l, c)) for c in range(ha)),
+                                ha, 2) for l in range(h)]
+                size = sum(len(x) for x in coded)
+                coded_total += size;  raw_total += 2 * ha * h
+                frames.append((1, build_udp_frame(struct.pack("<BIHI", 6, f, 0, size))))
+                for l0 in range(0, h, a.lines_per_dgram):
+                    frames.append((2, build_udp_frame(b"".join(coded[l0:l0 + a.lines_per_dgram]))))
+                continue
             frames.append((1, build_udp_frame(struct.pack("<BIHI", 6, f, 0, 0))))
             for l0 in range(0, h, a.lines_per_dgram):
                 frames.append((2, build_udp_frame(b"".join(
                     struct.pack("<H", pix(f - 1, l, c))
                     for l in range(l0, min(l0 + a.lines_per_dgram, h)) for c in range(ha)))))
     off = write_stream(a.outdir, frames)
-    print(f"{len(frames)} ethernet frames, {off} bytes, {f} network frames, modes {a.modes}")
+    print(f"{len(frames)} ethernet frames, {off} bytes, {f} network frames, modes {a.modes}"
+          + (f", QOI {raw_total} -> {coded_total} bytes" if a.qoi else ""))
 
 if __name__ == "__main__":
     main()

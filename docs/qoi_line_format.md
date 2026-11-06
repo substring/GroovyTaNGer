@@ -1,8 +1,9 @@
 # QOI line format (2026-11-06)
 
 Status: **implemented in simulation** (validated by the user 2026-11-06, OPEN 1 decided by
-measurement). Not in the FPGA build, not run on hardware. The protocol points (OPEN 2..4)
-stay provisional until agreed with Calamity.
+measurement), and wired into the gwline build (2026-11-06, simulated end to end, bitstream
+built, **not run on hardware**). The protocol points (OPEN 2..4) stay provisional until
+agreed with Calamity.
 
 | Piece | Where | Checked |
 |---|---|---|
@@ -10,6 +11,11 @@ stay provisional until agreed with Calamity.
 | per-line size tool | `tools/qoiline/qoiline_size.c` | |
 | Verilog decoder, MIT | `rtl/generic/compression/qoi_line_decoder.v` | `make qoi_line_decoder_tb`: 1602 lines vs the C model, 422 corrupted, random stalls |
 | GroovyMAME encoder | `patches/groovymame-mister-qoi.patch` | applies on rgb565 (+ pacing), syntax-only compile with the libretro driver flags; not run |
+| gwline receiver (byte FIFO 2 KB + decoder -> ring) | `rtl/core/groovy_qoi_rx.v`, `gwline_top.sv` (`QOI=1`) | `gwline_modeline_tb +QOI` on a `gen_gwline_stream.py --qoi` stream: 3 modes x 3 frames exact, `QE=0 QO=0`; raw sessions unchanged. Gowin mode 4: clk50 58.2 MHz, pix_clk 113 MHz, BSRAM 35/46 |
+
+On the gwline UART line, `QE=` counts corrupted QOI lines and `QO=` bytes dropped because
+the FIFO was full (both should stay 0). A QOI session is one whose CMD_INIT compression
+byte is 2; CMD_BLIT then gives the coded size (cSize), which ends the blit.
 
 ## Goal and constraints
 

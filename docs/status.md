@@ -204,9 +204,9 @@ The old build gave BF=37 over ~27 800 frames. Analysis: "Measured 2026-11-02" in
    (QOI per line, RGB888 and RGB565). **Done in simulation 2026-11-06**: C reference
    `tools/qoiline/qoiline.h`, Verilog decoder `rtl/generic/compression/qoi_line_decoder.v`
    (vendor-neutral, both MIT), GroovyMAME encoder `patches/groovymame-mister-qoi.patch`
-   (third separate patch, not run yet). Next: wire the decoder into gwline (CMD_INIT
-   compression 2, frame end by coded bytes), e2e simulation, then a bitstream for the user;
-   agree the CMD_INIT value with Calamity; per-line send times in GroovyMAME (pacing by
+   (third separate patch, not run yet). Wired into gwline (`rtl/core/groovy_qoi_rx.v`,
+   UART `QE=`/`QO=`), e2e simulation passes, mode-4 bitstream built, not run on HW.
+   Next: HW test by the user; agree the CMD_INIT value with Calamity; per-line send times in GroovyMAME (pacing by
    bytes no longer matches lines). Also what makes item 3 possible at full width (a
    640x240 field exceeds the 100 Mbit link).
 

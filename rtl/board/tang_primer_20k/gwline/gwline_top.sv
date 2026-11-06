@@ -29,7 +29,10 @@
 module gwline_top #(
     // see "geometry" below; a parameter so the benches can pick it (Gowin builds use
     // the default: edit it here, as before)
-    parameter integer VIDEO_MODE = 0
+    parameter integer VIDEO_MODE = 0,
+    // 1: decode QOI-per-line blits (CMD_INIT compression 2, docs/qoi_line_format.md,
+    // rtl/core/groovy_qoi_rx.v) and advertise it in CMD_GET_FEATURES
+    parameter integer QOI = 1
 ) (
     input  wire        clk,          // 27 MHz, H11
     input  wire        rst,          // active-low button, T10
@@ -162,7 +165,7 @@ module gwline_top #(
     wire [63:0] sr_pclk;
     wire [15:0] sr_ha, sr_hb, sr_he, sr_ht, sr_va, sr_vb, sr_ve, sr_vt;
     wire [7:0]  sr_il;
-    wire        blitting;  wire [2:0] cfg_bpp;
+    wire        blitting;  wire [2:0] cfg_bpp;  wire [31:0] blit_csize;
 
     groovy_packet_parser u_parser (
         .clk(clk50m), .rst(core_rst),
@@ -179,7 +182,7 @@ module gwline_top #(
         .sr_v_active(sr_va), .sr_v_begin(sr_vb), .sr_v_end(sr_ve), .sr_v_total(sr_vt), .sr_interlace(sr_il),
         .audio_size(audio_size),
         .blit_frame(blit_frame), .blit_field(), .blit_vsync(blit_vsync),
-        .blit_lz4(), .blit_csize(), .blit_flag()
+        .blit_lz4(), .blit_csize(blit_csize), .blit_flag()
     );
 
     groovy_session u_session (
@@ -221,7 +224,7 @@ module gwline_top #(
     wire ft_valid, ft_last, ft_ready, ft_busy;  wire [7:0] ft_data;
     groovy_features #(
         .PROTO_MAJOR(8'd2), .PROTO_MINOR(8'd0), .PROTO_PATCH(8'd0),
-        .COMPRESSION(8'b0000_0001), .RGB_MODES(8'b0000_0101)
+        .COMPRESSION(QOI ? 8'b0000_1001 : 8'b0000_0001), .RGB_MODES(8'b0000_0101)
     ) u_feat (
         .clk(clk50m), .rst(core_rst), .start(get_features_valid),
         .out_valid(ft_valid), .out_data(ft_data), .out_last(ft_last),
@@ -305,6 +308,17 @@ module gwline_top #(
     logic [31:0]          bytes_len;
     always_ff @(posedge clk50m)
         bytes_len <= src_w * (src_il_whole ? {src_h[14:0], 1'b0} : src_h) * cfg_bpp;
+    // QOI session (CMD_INIT compression 2, provisional value: docs/qoi_line_format.md).
+    // A blit with cSize = 0 is still raw; one with cSize != 0 carries cSize coded bytes,
+    // counted by blit_rx and decoded by groovy_qoi_rx.
+    logic cfg_qoi = 1'b0, blit_qoi = 1'b0;
+    always_ff @(posedge clk50m)
+        if (core_rst) cfg_qoi <= 1'b0;
+        else if (init_valid) cfg_qoi <= (QOI != 0) && (i_lz4 == 8'd2);
+    wire blit_is_qoi = cfg_qoi && (blit_csize != 32'd0);
+    always_ff @(posedge clk50m)
+        if (core_rst) blit_qoi <= 1'b0; else if (blit_valid) blit_qoi <= blit_is_qoi;
+    wire [31:0] blit_len = blit_is_qoi ? blit_csize : bytes_len;
     wire blit_timed_out;
     // TIMEOUT_CYCLES = 8ms @ 50MHz. The default (1ms) was too tight: a plain sleep()-paced
     // test sender's OWN scheduler jitter occasionally exceeded 1ms between lines, which
@@ -313,11 +327,25 @@ module gwline_top #(
     // generous headroom over normal OS/network gaps.
     groovy_blit_rx #(.ADDR_W(FB_ADDR_W), .TIMEOUT_CYCLES(400_000)) u_blit (
         .clk(clk50m), .rst(core_rst),
-        .start(blit_valid), .bytes_len(bytes_len), .bytespp(cfg_bpp),
+        .start(blit_valid), .bytes_len(blit_len), .bytespp(cfg_bpp),
         .in_valid(p_valid & blitting), .in_data(p_data),
         .blitting(blitting), .frame_done(frame_done), .bytes_recv(),
         .timed_out(blit_timed_out),
         .wr_en(fb_we), .wr_addr(fb_waddr), .wr_data(fb_wdata));
+
+    // ---- QOI blit decoder (clk50m): same pixel stream as blit_rx's, for the ring
+    wire        q_we, q_bad, q_ovf;  wire [15:0] q_data;
+    generate if (QOI) begin : g_qoi
+        groovy_qoi_rx u_qoi (
+            .clk(clk50m), .rst(video_rst), .start(blit_valid),
+            .fmt565(cfg_bpp == 3'd2), .width(src_w),
+            .in_valid(p_valid & blitting & blit_qoi), .in_data(p_data),
+            .px_we(q_we), .px_data(q_data), .line_bad(q_bad), .ovf(q_ovf));
+    end else begin : g_noqoi
+        assign {q_we, q_bad, q_ovf} = 3'b0;  assign q_data = 16'd0;
+    end endgenerate
+    wire        ring_we   = blit_qoi ? q_we   : fb_we;
+    wire [15:0] ring_data = blit_qoi ? q_data : fb_wdata;
 
     // =========================================================================
     // PIXEL CLOCK (720p) - the only PLL now (no DDR3 clocks)
@@ -424,7 +452,7 @@ module gwline_top #(
                       .H_SH(HSH), .V_REPL(VREP), .DYN_H(DYN ? 1 : 0),
                       .BAD_COLOR(16'h0000)) u_linering (
         .wr_clk(clk50m), .wr_rst(video_rst), .frame_start(blit_valid),
-        .px_we(fb_we), .px_data(fb_wdata), .native_w(src_w),
+        .px_we(ring_we), .px_data(ring_data), .native_w(src_w),
         .write_line(write_line), .src_line_wr(src_line_wr), .lead_top(lead_top),
         .pix_clk(pix_clk), .pix_rst(~hdmi_rst_n),
         .hcount(hcount), .h_rep(r_rep), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
@@ -565,6 +593,8 @@ module gwline_top #(
     //   LN,LX=min, max SIGNED lead (two's complement) of every frame since the last line
     //   BF=frames shown incomplete, of which LF=late EF=early OF=other, cumulative
     //   (see groovy_ring_stats.v)
+    //   QE=QOI lines received corrupted, QO=QOI bytes dropped (decoder FIFO full),
+    //   cumulative (groovy_qoi_rx.v; stay 0 in raw sessions)
     // =========================================================================
     // Ring health over every frame. The min/max window restarts with each UART line (the
     // request crosses from the 27 MHz UART domain as a toggle).
@@ -586,6 +616,14 @@ module gwline_top #(
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) frame_cnt <= 16'd0; else if (frame_done) frame_cnt <= frame_cnt + 16'd1;
 
+    logic [15:0] qe_cnt, qo_cnt;
+    always_ff @(posedge clk50m or posedge core_rst)
+        if (core_rst) begin qe_cnt <= 16'd0;  qo_cnt <= 16'd0; end
+        else begin
+            if (q_bad && qe_cnt != 16'hFFFF) qe_cnt <= qe_cnt + 16'd1;
+            if (q_ovf && qo_cnt != 16'hFFFF) qo_cnt <= qo_cnt + 16'd1;
+        end
+
     logic [15:0] to_cnt;
     always_ff @(posedge clk50m or posedge core_rst)
         if (core_rst) to_cnt <= 16'd0;
@@ -597,13 +635,14 @@ module gwline_top #(
     // snapshot into the 27 MHz UART domain (debug only: a value caught mid-change shows
     // up as one odd line in the log, nothing more)
     reg [15:0] q_fc, q_wl, q_rl, q_lt, q_gl, q_to, q_rj, q_vf, q_al, q_au;  reg q_se, q_tl;
-    reg [15:0] q_ln, q_lx, q_bf, q_lf, q_ef, q_of;
+    reg [15:0] q_ln, q_lx, q_bf, q_lf, q_ef, q_of, q_qe, q_qo;
     always @(posedge clk) begin
         q_fc <= frame_cnt;  q_wl <= write_line;  q_rl <= src_line_wr;  q_lt <= lead_top;
         q_gl <= {6'd0, gl_50};  q_to <= to_cnt;  q_rj <= rj_cnt;  q_vf <= vframe_cnt;
         q_se <= rx_seen;  q_tl <= tmds_lock_sync[1];
         q_al <= {3'd0, a_level};  q_au <= a_underruns;
         q_bf <= st_bad;  q_lf <= st_late;  q_ef <= st_early;  q_of <= st_other;
+        q_qe <= qe_cnt;  q_qo <= qo_cnt;
         if (dbg_line_start) begin q_ln <= st_lmin;  q_lx <= st_lmax; end
     end
 
@@ -614,14 +653,15 @@ module gwline_top #(
     function [31:0] hx4; input [15:0] v;
         hx4 = {hxd(v[15:12]), hxd(v[11:8]), hxd(v[7:4]), hxd(v[3:0])};
     endfunction
-    localparam integer DBGLEN = 139;
+    localparam integer DBGLEN = 155;
     wire [8*DBGLEN-1:0] dmsg = {
         "RD=", hx4(q_fc), " WL=", hx4(q_wl), " RL=", hx4(q_rl), " LT=", hx4(q_lt),
         " GL=", hx4(q_gl), " TO=", hx4(q_to), " RJ=", hx4(q_rj), " VF=", hx4(q_vf),
         " SE=", hxd({3'b0, q_se}), " TL=", hxd({3'b0, q_tl}),
         " AL=", hx4(q_al), " AU=", hx4(q_au),
         " LN=", hx4(q_ln), " LX=", hx4(q_lx), " BF=", hx4(q_bf), " LF=", hx4(q_lf),
-        " EF=", hx4(q_ef), " OF=", hx4(q_of), 8'h0D, 8'h0A };
+        " EF=", hx4(q_ef), " OF=", hx4(q_of), " QE=", hx4(q_qe), " QO=", hx4(q_qo),
+        8'h0D, 8'h0A };
     reg [7:0] di=0, dtx=0; reg dwr=0; reg [2:0] dst=0; reg [23:0] dhold=0;
     wire [7:0] dlb = dmsg[8*(DBGLEN-1-di) +: 8];
     assign dbg_line_start = (dst == 3'd0);

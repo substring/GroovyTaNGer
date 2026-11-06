@@ -28,6 +28,8 @@
         <File path="../../../core/groovy_pll_solver.v" type="file.verilog" enable="1"/>
         <File path="../../../generic/video/superres_factor.v" type="file.verilog" enable="1"/>
         <File path="../../../core/groovy_blit_rx.v" type="file.verilog" enable="1"/>
+        <File path="../../../core/groovy_qoi_rx.v" type="file.verilog" enable="1"/>
+        <File path="../../../generic/compression/qoi_line_decoder.v" type="file.verilog" enable="1"/>
         <!-- Video: timing gen, DVI, UART -->
         <File path="../../../vendor/nand2mario_ddr3/uart_tx_V2.v" type="file.verilog" enable="1"/>
         <File path="../../../vendor/gowin/rpll_tmds.v" type="file.verilog" enable="1"/>

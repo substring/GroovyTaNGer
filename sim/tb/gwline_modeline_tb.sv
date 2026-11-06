@@ -22,6 +22,9 @@
 //   4. counts pixel-domain resets: none when the rPLL coefficients did not change (a
 //      seamless change, as for 320x240p -> 320x448i at one pclk), one when they did.
 // Plusargs: +DIR=<stream dir>  +SEGS=<number of segments, default 3>  +LEAD=<lines, 16>
+//           +QOI: the stream is QOI per line (gen_gwline_stream.py --modes ... --qoi), the
+//                 frames are pixq() and the decoder must report no corrupted line (QE)
+//                 and no dropped byte (QO).
 `timescale 1ns/1ps
 `include "rmii.svh"
 `default_nettype none
@@ -44,6 +47,15 @@ module gwline_modeline_tb;
 
     function automatic [15:0] pix(input integer f, input integer l, input integer c);
         pix = (l * 16'h9E37) ^ (c * 16'h7F4B) ^ (f * 16'h1D2F) ^ 16'h5A5A;
+    endfunction
+    // keep in sync with gen_gwline_stream.py pixq()
+    function automatic [15:0] pixq(input integer f, input integer l, input integer c);
+        if (l % 8 == 7) pixq = pix(f, l, c);
+        else            pixq = pix(f, l, c >> 4) ^ (((c >> 2) & 3) << 5);
+    endfunction
+    reg qoi = 1'b0;
+    function automatic [15:0] want(input integer f, input integer l, input integer c);
+        want = qoi ? pixq(f, l, c) : pix(f, l, c);
     endfunction
 
     // ------------------------------------------------------------ stream from file
@@ -169,7 +181,7 @@ module gwline_modeline_tb;
             in_line = 1;
             if (dut.pix565 != 16'h0000) nz = 1;
             for (k = f_lo; k <= f_hi; k = k + 1)
-                if (dut.pix565 !== pix(k, vc3, x / dut.r_rep)) begin
+                if (dut.pix565 !== want(k, vc3, x / dut.r_rep)) begin
                     bad[k] = bad[k] + 1;  if (dut.pix565 != 16'h0000) badnb[k] = badnb[k] + 1;
                 end
             x = x + 1;
@@ -198,6 +210,7 @@ module gwline_modeline_tb;
         void'($value$plusargs("DIR=%s", dir));
         void'($value$plusargs("LEAD=%d", lead));
         void'($value$plusargs("SEGS=%d", nsegs));
+        if ($test$plusargs("QOI")) qoi = 1'b1;
         $readmemh({dir, "/stream_bytes.hex"}, sbytes);
         $readmemh({dir, "/stream_idx.hex"}, sidx);
         while (nframes_eth < 4096 && sidx[nframes_eth] !== 64'hx && sidx[nframes_eth][55:32] != 0)
@@ -295,6 +308,9 @@ module gwline_modeline_tb;
         $display("wrong lines: %0d; blit timeouts TO=%0d, frames received RD=%0d of %0d",
                  wrong_lines, dut.to_cnt, dut.frame_cnt, nf_total);
         if (wrong_lines != 0 || dut.to_cnt != 0 || dut.frame_cnt != nf_total) errors = errors + 1;
+        $display("QOI session %0d: corrupted lines QE=%0d, dropped bytes QO=%0d",
+                 dut.cfg_qoi, dut.qe_cnt, dut.qo_cnt);
+        if (dut.cfg_qoi != qoi || dut.qe_cnt != 0 || dut.qo_cnt != 0) errors = errors + 1;
         if (errors == 0) $display("PASS: gwline_modeline_tb");
         else             $display("FAIL: gwline_modeline_tb (%0d errors)", errors);
         $finish;
