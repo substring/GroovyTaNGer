@@ -40,7 +40,10 @@ module gwline_modeline_tb;
     rmii netrmii(.clk50m(clk50m), .rx_crs(crs_drv), .mdc(), .txen(), .mdio(mdio_w),
                  .txd(), .rxd(rxd_drv));
     wire [5:0] led;  wire uart_txp;  wire hp_bck, hp_ws, hp_din, pa_en;
-    gwline_top #(.VIDEO_MODE(4)) dut (.clk(clk27), .rst(rst_n), .netrmii(netrmii), .phyrst(),
+    // IDLE_PURGE 150 ms instead of 0.5 s (longer than the end of the stream to the CMD_CLOSE
+    // check, ~70 ms, so that one checks CMD_CLOSE alone): +IDLE checks it without a
+    // long simulation
+    gwline_top #(.VIDEO_MODE(4), .IDLE_PURGE(7_500_000)) dut (.clk(clk27), .rst(rst_n), .netrmii(netrmii), .phyrst(),
                     .O_tmds_clk_p(), .O_tmds_clk_n(), .O_tmds_data_p(), .O_tmds_data_n(),
                     .led(led), .uart_txp(uart_txp),
                     .HP_BCK(hp_bck), .HP_WS(hp_ws), .HP_DIN(hp_din), .PA_EN(pa_en));
@@ -323,6 +326,20 @@ module gwline_modeline_tb;
         // +FX=n: the stream has n broadcasts to another port (gen --foreign), all dropped
         $display("foreign datagrams dropped FX=%0d (expected %0d)", dut.fx_cnt, fx_want);
         if (dut.fx_cnt != fx_want) errors = errors + 1;
+
+        // end of session: the ring is purged (black screen) by CMD_CLOSE, or with +IDLE by
+        // the no-blit timeout. Before, the last lines stayed valid and were shown for ever.
+        @(posedge dut.frame_start);  @(posedge dut.frame_start);  #10_000;
+        $display("after the stream: %0d good lines still shown (stale tail of the last frame)", dut.gl_50);
+        if ($test$plusargs("IDLE")) #150_000_000;
+        else begin
+            while (i < nframes_eth && sidx[i][63:56] != 8'd10) i = i + 1;
+            if (i < nframes_eth) begin send_eth(i);  i = i + 1; end
+            else begin $display("FAIL: no CMD_CLOSE in the stream");  errors = errors + 1; end
+        end
+        repeat (3) @(posedge dut.frame_start);  #10_000;
+        $display("after %s: %0d good lines shown", $test$plusargs("IDLE") ? "the idle timeout" : "CMD_CLOSE", dut.gl_50);
+        if (dut.gl_50 != 0) errors = errors + 1;
         if (errors == 0) $display("PASS: gwline_modeline_tb");
         else             $display("FAIL: gwline_modeline_tb (%0d errors)", errors);
         $finish;

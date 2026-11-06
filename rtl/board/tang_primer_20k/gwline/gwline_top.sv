@@ -32,7 +32,9 @@ module gwline_top #(
     parameter integer VIDEO_MODE = 0,
     // 1: decode QOI-per-line blits (CMD_INIT compression 2, docs/qoi_line_format.md,
     // rtl/core/groovy_qoi_rx.v) and advertise it in CMD_GET_FEATURES
-    parameter integer QOI = 1
+    parameter integer QOI = 1,
+    // no CMD_BLIT for this long (clk50m cycles, 0.5 s): purge the ring (black screen)
+    parameter integer IDLE_PURGE = 25_000_000
 ) (
     input  wire        clk,          // 27 MHz, H11
     input  wire        rst,          // active-low button, T10
@@ -272,7 +274,19 @@ module gwline_top #(
     // also on CMD_SWITCHRES: the ring's lines belong to the old geometry (another width
     // leaves stale columns at the right edge, seen in sim/tb/gwline_modeline_tb.sv);
     // GroovyMAME sends the modeline right before the next blit, so nothing is lost
-    wire video_rst = core_rst | init_valid | switchres_valid;
+    // also when the stream ENDS: the slot tags only hold a line number, so the last lines
+    // received stayed valid and were shown on every frame after the session (HW: a band
+    // of lines left at the bottom of the screen for ever). CMD_CLOSE purges the ring
+    // (black screen), and so does a stream that stops without one (host killed or
+    // crashed): IDLE_PURGE clk50m cycles without a CMD_BLIT or a pixel (a frame's lines
+    // keep coming for a whole frame time after its CMD_BLIT).
+    wire ring_we;                          // pixel into the ring (assigned below)
+    logic [25:0] idle_cnt;
+    always_ff @(posedge clk50m)
+        if (core_rst || blit_valid || ring_we) idle_cnt <= 26'd0;
+        else if (idle_cnt <= IDLE_PURGE[25:0]) idle_cnt <= idle_cnt + 26'd1;
+    wire idle_purge = (idle_cnt == IDLE_PURGE[25:0]);
+    wire video_rst = core_rst | init_valid | switchres_valid | close_valid | idle_purge;
 
     // ---- BLIT pixel accumulator (clk50m) ----
     wire                  fb_we, frame_done;
@@ -344,7 +358,7 @@ module gwline_top #(
     end else begin : g_noqoi
         assign {q_we, q_bad, q_ovf} = 3'b0;  assign q_data = 16'd0;
     end endgenerate
-    wire        ring_we   = blit_qoi ? q_we   : fb_we;
+    assign      ring_we   = blit_qoi ? q_we   : fb_we;
     wire [15:0] ring_data = blit_qoi ? q_data : fb_wdata;
 
     // =========================================================================

@@ -222,6 +222,7 @@ def modes_stream(a):
                 pixels(b"".join(
                     struct.pack("<H", pix(f - 1, l, c))
                     for l in range(l0, min(l0 + a.lines_per_dgram, h)) for c in range(ha)))
+    frames.append((10, build_udp_frame(bytes([1]))))     # CMD_CLOSE: the bench checks the purge
     off = write_stream(a.outdir, frames)
     print(f"{len(frames)} ethernet frames, {off} bytes, {f} network frames, modes {a.modes}"
           + (f", QOI {raw_total} -> {coded_total} bytes" if a.qoi else "")
