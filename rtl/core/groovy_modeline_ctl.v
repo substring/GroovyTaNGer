@@ -24,8 +24,8 @@
 //     an HDMI sink does not even resync.
 //   - NEW coefficients: pll_hold holds the whole pixel domain in reset (and blanks the
 //     output), the rPLL selects change, and the hold lasts SETTLE_CYCLES (the dynamic
-//     rPLL's LOCK does not assert, measured in rtl/board/tang_primer_20k/video/README.md,
-//     so this is a fixed delay like groovy_video_dyn_top's). The pixel domain reloads the
+//     rPLL's LOCK does not assert, measured on HW, see
+//     rtl/board/tang_primer_20k/video/README.md, so this is a fixed delay). The pixel domain reloads the
 //     shadows while held.
 // A modeline the solver could not reach, or that is not self-consistent, is refused
 // (err stays set until the next accepted one); the current raster keeps running.

@@ -496,7 +496,7 @@ Design points to settle when it starts:
 
 ### Measured 2026-11-05: QOI per line on a PS2 capture (4x4 Evo, 640x480, RGB888)
 
-User goal: QOI and RGB888. Tool: `tools/qoi_line_size.c` (QOI state reset at every line, +2
+User goal: QOI and RGB888. Tool: `tools/qoiline/qoiline_size.c` (QOI state reset at every line, +2
 bytes of length per line), on `4x4.mp4` (2130 frames, h264 capture), one 240-line field per
 frame. Link budget: ~11.96 MB/s of UDP payload, minus 192 kB/s of audio, = ~750 bytes per
 15.69 kHz raster line, against 1920 bytes of raw RGB888.

@@ -1,39 +1,37 @@
-# tools — protocol bring-up helpers
+# tools
 
-Host-side utilities for exercising the Groovy_MiSTer protocol against any
-GroovyMister receiver (a real MiSTer now, Groovy_Tang once its Ethernet/blit
-path exists). Wire formats per [../docs/protocol_verified.md](../docs/protocol_verified.md).
+Host-side helpers. Wire formats per [../docs/protocol_verified.md](../docs/protocol_verified.md).
 
-## `gm_test_app.c` — 15 kHz color-bar display
+## `gm_test_sender.py` — protocol test client
 
-Self-contained C client (no libgroovymister needed). Sends `CMD_INIT` (raw
-RGB888), `CMD_SWITCHRES` to a **15 kHz 240p** modeline (6.700 MHz, 320×240,
-hfreq 15.73 kHz, 60 Hz), then streams an SMPTE-style color-bar test image every
-frame until Ctrl+C (then `CMD_CLOSE`). Prints the ACK status it gets back.
+Speaks the Groovy_MiSTer protocol to the board (default port 32100) without GroovyMAME:
+one command at a time to isolate a step, or a whole paced stream. No build step.
 
 ```bash
-cc -O2 -Wall -o gm_test_app gm_test_app.c
-./gm_test_app <device-ip> [port]      # port defaults to 32100
+./gm_test_sender.py --host 192.168.15.14 version
+./gm_test_sender.py --host 192.168.15.14 features
+./gm_test_sender.py --host 192.168.15.14 init --rate 48000 --chan 2 --rgb 0
+./gm_test_sender.py --host 192.168.15.14 blitfile picture.png        # + its modeline
+./gm_test_sender.py --host 192.168.15.14 blitrace --video video.mp4 --audio video \
+    --frames 3600 --beacon                                          # beam-raced video
+./gm_test_sender.py --host 192.168.15.14 close
 ```
 
-The modeline and image are compile-time constants at the top of the file — easy
-to change (e.g. another 15 kHz resolution, or interlaced). Assumes a
-little-endian host.
+`./gm_test_sender.py --help` and `<command> --help` list every command and option.
 
-## `gm_test_sender.py` — one packet at a time
-
-Sends a single control packet and decodes the reply. Good for isolating one
-validation rung. No build step.
+## `gw_build.sh` — headless Gowin build
 
 ```bash
-./gm_test_sender.py --host <ip> version
-./gm_test_sender.py --host <ip> init --rate 48000 --chan 2 --rgb 0
-./gm_test_sender.py --host <ip> status
-./gm_test_sender.py --host <ip> switchres --pclk 6.7 \
-    --hactive 320 --hbegin 336 --hend 364 --htotal 426 \
-    --vactive 240 --vbegin 244 --vend 247 --vtotal 262 --interlace 0
-./gm_test_sender.py --host <ip> blit --frame 1 --field 0 --vsync 0
+tools/gw_build.sh rtl/board/tang_primer_20k/gwline/gwline.gprj
 ```
+Synthesis + place and route + bitstream with `gw_sh`, no GUI; the bitstream lands in
+`impl/pnr/<name>.fs` next to the `.gprj`.
+
+## `net/` — fq qdisc for GroovyMAME's pacing
+
+`-mister_pacing` / `-mister_linepacing` need the `fq` qdisc on the interface that sends
+the stream: `90-groovy-fq` (NetworkManager dispatcher) or `groovy-fq.network.example`
+(systemd-networkd). See `docs/groovymame_client.md` and `patches/README.md`.
 
 ## `qoiline/` — QOI per line (C reference)
 
@@ -46,7 +44,8 @@ of raw RGB24 frames, in RGB888 or RGB565:
     gcc -O2 -o qoiline_size tools/qoiline/qoiline_size.c tools/qoiline/qoiline.c
     ffmpeg -i in.mp4 -an -f rawvideo -pix_fmt rgb24 - | ./qoiline_size 320 224 565
 
-## Status
-Both build/run and emit correct on-wire bytes (verified locally). **Not yet
-tested against a live receiver** — that happens when a MiSTer or the Groovy_Tang
-Ethernet path is available (validation ladder Rungs 1–5).
+## `gen_gwline_stream.py`, `gen_gwline_frames.py` — simulation streams
+
+Build complete Ethernet frames (checksums, FCS) of a GroovyMAME session for the
+`gwline` benches, which clock them into the real `udp.sv` over RMII. `make test-gwline`
+runs them; `gen_gwline_stream.py` documents every option.

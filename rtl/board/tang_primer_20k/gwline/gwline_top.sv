@@ -1,35 +1,40 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Groovy_Tang - network -> BRAM line ring -> 720p HDMI (beam-race, NO DDR3).
+// Groovy_Tang - network -> BRAM line ring -> HDMI (beam-race, NO DDR3). THE release design.
 //
-// The beam-race architecture (docs/beamrace_design.md). Replaces the DDR3 framebuffer
-// with a small dual-port BRAM LINE RING: beam-race only needs the write->read working
-// set (a few lines), which fits BRAM, and a true dual-port BRAM serves writer + reader
-// SIMULTANEOUSLY with NO arbitration - so the DDR3-era writer/reader bus contention
-// (the ~1 s crawl) and all the DQS/byte-lane grief simply disappear.
+// A Groovy_MiSTer protocol receiver (GroovyMAME's -mister output, UDP port 32100,
+// FPGA at 192.168.15.14) that shows each line as it arrives instead of buffering frames
+// (docs/beamrace_design.md). A small dual-port BRAM LINE RING holds the write->read
+// working set (NLINES lines); a true dual-port BRAM serves writer and reader at the same
+// time with no arbitration.
 //
-// Path:  PHY -> udp -> parser -> blit_rx (RGB565, clk50m)
+// Path:  PHY -> udp -> framer (our port only) -> parser -> blit_rx (RGB888/RGB565 raw,
+//        or QOI per line through groovy_qoi_rx; stored as RGB565, clk50m)
 //            -> groovy_linering (writer -> NLINES-slot dual-port BRAM ring + slot tags
 //                                -> raster-driven scanout, pix_clk)
 //            -> DVI_TX -> HDMI
+//        CMD_AUDIO -> groovy_audio -> PT8211 DAC (Dock jack).
 //
 // Beam-race contract (all of it lives in rtl/core/groovy_linering.v):
-//   - the 720p raster FREE-RUNS from reset and is never frozen or re-phased;
+//   - the raster FREE-RUNS and is never frozen or re-phased by the network;
 //   - the writer stores every pixel the moment it arrives (no FIFO, no guard);
 //   - a per-slot line tag decides, per pixel, whether the ring really holds the line
 //     the raster is on; if not that pixel is blanked.
 //   The HOST keeps the two apart: it leads the raster by ~NLINES/2 source lines, using
 //   the raster line reported in every ACK (vCount). UART GL=/LT= show the result.
 //
-// This first cut fixes the geometry to 320x240 -> 4x3 -> 1280x720 (like gwddr3net) to
-// isolate the ring from the dynamic-geometry work. RGB565. DVI_TX is encrypted Gowin
+// The raster comes from VIDEO_MODE (see "geometry" below): 4, the default, follows the
+// CMD_SWITCHRES modeline like a MiSTer; 0..3 are fixed rasters kept for HDMI screens
+// and converters that need them. CMD_CLOSE, and 0.5 s without pixels, purge the ring.
+// A debug line goes out on the UART (/dev/ttyUSB1, 115200). DVI_TX is encrypted Gowin
 // IP (not committed).
 `include "rmii.svh"
 `default_nettype none
 
 module gwline_top #(
-    // see "geometry" below; a parameter so the benches can pick it (Gowin builds use
-    // the default: edit it here, as before)
-    parameter integer VIDEO_MODE = 0,
+    // see "geometry" below: 4 follows the host's modeline (the release setting); 0 is a
+    // fixed 1280x720@60 raster (320x240 sources scaled 4x3) for HDMI screens. A parameter
+    // so the benches can pick it; Gowin builds use the default.
+    parameter integer VIDEO_MODE = 4,
     // 1: decode QOI-per-line blits (CMD_INIT compression 2, docs/qoi_line_format.md,
     // rtl/core/groovy_qoi_rx.v) and advertise it in CMD_GET_FEATURES
     parameter integer QOI = 1,
@@ -55,15 +60,17 @@ module gwline_top #(
     localparam [15:0] OUR_PORT = 16'd32100;
 
     // ====================== geometry ===================================
-    // VIDEO_MODE 0: 1280x720@60 (CEA, 74.25 MHz, 4x3 scaling) - the default, HDMI screens.
+    // VIDEO_MODE 0: 1280x720@60 (CEA, 74.25 MHz, 4x3 scaling, fixed 320x240 source
+    //   geometry): for HDMI screens, which do not accept 15 kHz modelines. Set
+    //   VIDEO_MODE = 0 above and rebuild.
     // VIDEO_MODE 1: 640x480@60 (VESA, 25.2 MHz, exact 2x2 scaling, negative syncs) - the
     //   mode every VGA monitor accepts, for HDMI->VGA converters (720p is a TV mode that
-    //   many VGA monitors reject as "mode not supported"). Host: blitrace --vtotal 525
+    //   many VGA monitors reject as "mode not supported"). Host: gm_test_sender.py blitrace --vtotal 525
     //   --vactive 480.
     // VIDEO_MODE 2: 320x240 native 15 kHz "240p" (6.75 MHz = 27*5/4/5, 429x262 = 15.734 kHz /
     //   60.05 Hz, 1x1, hsync 32 px = 4.7 us, vsync 3 lines, negative syncs) - for 15 kHz CRTs
     //   and to find whether an HDMI->VGA converter accepts a pixel clock far below 25 MHz.
-    //   Host: blitrace --vtotal 262 --vactive 240 --refresh 60.0547.
+    //   Host: gm_test_sender.py blitrace --vtotal 262 --vactive 240 --refresh 60.0547.
     // VIDEO_MODE 3: the SAME 15 kHz 240p raster (15.734 kHz / 60.05 Hz) with each pixel
     //   repeated 4x horizontally (1280 x 240 at 27 MHz = 27*5/1/5, above the ~25 MHz HDMI
     //   floor): "super-resolution" for converters that refuse a low pixel clock. Same host
@@ -94,9 +101,9 @@ module gwline_top #(
     localparam integer FB_ADDR_W  = 17;
 
     // ---- line ring sizing ----
-    // 32 lines = the drift/jitter budget the PoC (tools/beamrace_poc.py) validated for
-    // paced beam-race up to 500ppm PC<->Tang clock skew. NLINES must be a power of two
-    // (slot = line mod NLINES via low bits).
+    // 32 lines = the drift/jitter budget a time-driven model of the pacing validated for
+    // paced beam-race up to 500ppm PC<->Tang clock skew (docs/beamrace_design.md).
+    // NLINES must be a power of two (slot = line mod NLINES via low bits).
     localparam integer NLINES  = 32;     // ring depth (drift/jitter tolerance)
     localparam integer LINE_W  = 512;    // columns stored per slot (>= widest native line)
 

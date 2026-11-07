@@ -7,7 +7,7 @@ setting — not just "it compiled" or "no error". Each rung is validated first i
 **hardware** (real PC client + observable result).
 
 Legend: ☐ todo · ◐ sim-verified · ● hardware-confirmed.
-References: `groovy_tang_spec.md` §5 (protocol), §9 (roadmap phases).
+References: `original_spec.md` §5 (protocol), §9 (roadmap phases).
 
 ---
 

@@ -4,7 +4,7 @@ Verified 2026-06-10 against `psakhis/Groovy_MiSTer@main`:
 - client lib: `api/groovymister.{h,cpp}` (defines what goes on the wire)
 - receiver:   `hps_linux/src/support/groovy/groovy.cpp` (defines how it's parsed)
 
-This **supersedes inferences** in `groovy_tang_spec.md §5` where they differ.
+This **supersedes inferences** in `original_spec.md §5` where they differ.
 Line numbers cite the source above.
 
 ## Command codes (groovy.cpp:113-120 / groovymister.cpp:32-39) — all confirmed

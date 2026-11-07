@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Groovy_Tang - BLIT pixel receiver (Rung 5). Strict to the Groovy_MiSTer model.
 //
-// Reference (extern/Groovy_MiSTer .../groovy.cpp): CMD_BLIT is a header-only
+// Reference (github.com/psakhis/Groovy_MiSTer, hps_linux .../groovy.cpp): CMD_BLIT is a header-only
 // packet; the pixel data arrives in SEPARATE following datagrams and is
 // accumulated by byte count until bytes_recv >= bytes_len (= hactive*vactive*bpp).
 // While blitting, datagrams are DATA, not commands. We mirror that exactly: the

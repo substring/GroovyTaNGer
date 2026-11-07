@@ -18,19 +18,11 @@ Each keeps its own license and attribution; do not strip per-file headers.
       Upstream author: ZiyangYE (https://github.com/ZiyangYE/Verilog_TCP)
       See its LICENSE + NOTICE.md.
 
-  - nand2mario DDR3 controller ........ rtl/vendor/nand2mario_ddr3/  (when vendored)
-      Apache-2.0. Low-latency DDR3-800 PHY/controller for GW2A / Tang Primer 20K.
+  - nand2mario UART TX ................ rtl/vendor/nand2mario_ddr3/uart_tx_V2.v
+      Apache-2.0. UART transmitter for the debug line.
       Source: https://github.com/nand2mario/ddr3-tang-primer-20k
       Upstream author: nand2mario.
-      See its LICENSE + NOTICE.md when added. Design notes: docs/ddr3.md.
-
-  - sameer / hdl-util HDMI ............. rtl/generic/video/hdmi/  (when vendored)
-      Forked via tangcore nestang hdmi2 (a Gowin adaptation).
-      Upstream: https://github.com/hdl-util/hdmi  (license per its repo; record on vendor).
-      See that dir's README; currently empty (not yet vendored).
-
-  - nand2mario tangcore (hdmi2) ....... (when vendored)
-      See vendored sources for notices.
+      See its LICENSE + NOTICE.md.
 
 
 GOWIN PROPRIETARY IP
@@ -43,6 +35,9 @@ own (proprietary) license; redistribution terms are Gowin's, not ours.
       Copyright Gowin Semiconductor). Came with the Sipeed UDP example.
   - rtl/board/.../video/dvi_tx/dvi_tx.v . Gowin DVI_TX IP. Proprietary/encrypted,
       git-ignored, regenerate locally (Gowin IP wizard) — see that dir's README.
+  - rtl/board/.../gwddr3video/mem_pll.v . Gowin rPLL IP (tracked; "IP file").
+  - rtl/board/.../gwddr3video/ddr3_ip/ .. Gowin DDR3 Memory Interface IP.
+      Encrypted, git-ignored, regenerate locally — see that dir's README.
 
 Gowin device primitives instantiated directly (rPLL, OSER, ELVDS_OBUF, B-SRAM,
 DQS, etc.) are part of the toolchain/device and are not redistributed by us.
@@ -50,7 +45,7 @@ DQS, etc.) are part of the toolchain/device and are not redistributed by us.
 
 LICENSE COMPATIBILITY
 =====================
-The Apache-2.0 vendored blocks (Sipeed UDP, nand2mario DDR3) are incompatible
+The Apache-2.0 vendored blocks (Sipeed UDP, nand2mario UART) are incompatible
 with GPLv2 but ARE compatible with GPLv3. Because Groovy_Tang is GPL-2.0-OR-LATER,
 the combined/linked work may be used under GPLv3, under which Apache-2.0 is
 compatible. Apache-2.0 NOTICE/attribution is preserved in each vendor directory.

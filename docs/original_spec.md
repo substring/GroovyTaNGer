@@ -1,5 +1,8 @@
 # Groovy_Tang — Specification et architecture du projet
 
+> **Historical document (June 2026), kept as written.** Many modules and phases it plans
+> were dropped or replaced; the current state is in [status.md](status.md).
+
 **Version 0.2 — 2026-06-05**
 **Auteur :** Subs (avec assistance Claude)
 **Statut :** Document de référence vivant, à mettre à jour au fil des décisions

@@ -14,7 +14,6 @@ send UDP without writing an Ethernet MAC from scratch (spec §6.4, roadmap Phase
 | `udp.sv` | Sipeed/ZiyangYE | RMII MAC + ARP + IPv4 + UDP; byte-stream RX/TX interface |
 | `rmii.svh` | Sipeed | RMII SystemVerilog interface |
 | `PLL_6M.v` | Sipeed (Gowin IP) | rPLL: 27 MHz → 6 MHz / 1 MHz (the udp block's `clk1m`) |
-| `top_loopback_reference.sv` | Sipeed | the original loopback top — kept as a reference only |
 
 ## License compatibility
 Groovy_Tang is **GPL-2.0-or-later**. Apache-2.0 is incompatible with GPLv2 but
@@ -23,7 +22,8 @@ GPLv3. Apache-2.0 NOTICE/attribution is preserved here. Do not strip these files
 license headers.
 
 ## Local use
-Not modified. Our integration lives outside this directory
-(`rtl/board/tang_primer_20k/eth/groovy_eth_top.sv`), which instantiates `udp` and
+Modified where marked "Groovy_Tang" in `udp.sv` (RX/TX fixes and diagnostic counters). Our integration lives
+outside this directory (`rtl/board/tang_primer_20k/gwline/gwline_top.sv`), which
+instantiates `udp` and
 bridges its byte stream into `groovy_packet_parser` / `groovy_session` /
 `groovy_ack_*`.

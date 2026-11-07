@@ -21,12 +21,10 @@
 //            +NF=<network frames to send>                                (default 6)
 //            +RPACE=1  pace datagrams at the raster's ACTIVE line rate, then idle through
 //                      vertical blanking (default 0: spread evenly over the whole frame)
-// Define LEGACY to test the pre-2026-10 design (sim/tb/linering_legacy_wrap.sv) instead
-// of rtl/core/groovy_linering.v; -GLEGACY_COL_W=9 gives it the corrected ring storage.
 `timescale 1ns/1ps
 `default_nettype none
 
-module groovy_linering_beamrace_tb #(parameter integer LEGACY_COL_W = 10);
+module groovy_linering_beamrace_tb;
     localparam integer SRC_W = 320, SRC_H = 240, OUT_W = 1280, OUT_H = 720;
     localparam integer MAXF = 16;
     localparam real    PIX_T   = 13.468;                       // ns, 74.25 MHz
@@ -47,16 +45,6 @@ module groovy_linering_beamrace_tb #(parameter integer LEGACY_COL_W = 10);
         pix = (l * 16'h9E37) ^ (c * 16'h7F4B) ^ (f * 16'h1D2F) ^ 16'h5A5A;
     endfunction
 
-`ifdef LEGACY
-    wire [31:0] ovf_count;
-    linering_legacy_wrap #(.COL_W(LEGACY_COL_W)) dut (
-        .clk50m(clk50m), .rst50(rst50), .frame_start(frame_start),
-        .px_we(px_we), .px_data(px_data),
-        .pix_clk(pix_clk), .hdmi_rst_n(hdmi_rst_n),
-        .hcount(hcount), .vcount(vcount), .de(de), .vframe_start(vframe_start),
-        .pix565(pix565), .de_o(de_o), .write_line(write_line), .ovf_count(ovf_count));
-    localparam LEGACY_MODE = 1;
-`else
     wire hsync, vsync, line_start, hs_o, vs_o;
     wire [31:0] ovf_count = 0;
     video_timing_gen u_timing (
@@ -76,8 +64,6 @@ module groovy_linering_beamrace_tb #(parameter integer LEGACY_COL_W = 10);
         .hcount(hcount), .vcount(vcount), .de(de), .hsync(hsync), .vsync(vsync),
         .vframe_start(vframe_start),
         .pix(pix565), .de_o(de_o), .hs_o(hs_o), .vs_o(vs_o), .good_lines(good_lines));
-    localparam LEGACY_MODE = 0;
-`endif
 
     // ------------------------------------------------------------------ sender model
     integer lead = 20, jit_us = 0, nf = 6, seed = 1, rpace = 0;
@@ -105,15 +91,10 @@ module groovy_linering_beamrace_tb #(parameter integer LEGACY_COL_W = 10);
         repeat (20) @(posedge pix_clk); hdmi_rst_n = 1;
         repeat (100) @(posedge clk50m);        // ring writer's slot-tag clear sweep
 
-        if (LEGACY_MODE) begin
-            // legacy raster is frozen until 16 lines are in: it picks its own phase
-            t0 = $realtime + 100_000.0;
-        end else begin
-            // free-running raster: phase-lock like gm_test_sender (lead lines ahead)
-            @(posedge vframe_start);
-            t0 = $realtime + FRAME_T - lead * (2.0 * FRAME_T / 240.0 / 2.0);
-            if (t0 < $realtime + 50_000.0) t0 = t0 + FRAME_T;
-        end
+        // free-running raster: phase-lock like gm_test_sender (lead lines ahead)
+        @(posedge vframe_start);
+        t0 = $realtime + FRAME_T - lead * (2.0 * FRAME_T / 240.0 / 2.0);
+        if (t0 < $realtime + 50_000.0) t0 = t0 + FRAME_T;
 
         for (f = 0; f < nf; f = f + 1) begin
             wait_until(t0 + f * FRAME_T - 30_000.0);          // BLIT header just before
@@ -172,7 +153,7 @@ module groovy_linering_beamrace_tb #(parameter integer LEGACY_COL_W = 10);
             if (vframe >= 0) report_frame;
             vframe = vframe + 1;
         end
-        if (de_o !== de3 && hdmi_rst_n && !LEGACY_MODE) de_mismatch = de_mismatch + 1;
+        if (de_o !== de3 && hdmi_rst_n) de_mismatch = de_mismatch + 1;
         if (de3) begin
             in_line <= 1;
             for (k = 0; k < nf; k = k + 1)
@@ -189,8 +170,8 @@ module groovy_linering_beamrace_tb #(parameter integer LEGACY_COL_W = 10);
     initial begin
         wait (sender_done);
         #(FRAME_T * 1.5);
-        $display("SUMMARY %s lead=%0d jit_us=%0d : steady-state %0d/%0d lines pixel-exact (%.1f%%), de_mismatch=%0d, ovf=%0d",
-                 LEGACY_MODE ? "LEGACY" : "LINERING", lead, jit_us, total_good_all, total_lines_all,
+        $display("SUMMARY LINERING lead=%0d jit_us=%0d : steady-state %0d/%0d lines pixel-exact (%.1f%%), de_mismatch=%0d, ovf=%0d",
+                 lead, jit_us, total_good_all, total_lines_all,
                  total_lines_all ? 100.0 * total_good_all / total_lines_all : 0.0, de_mismatch, ovf_count);
         $finish;
     end

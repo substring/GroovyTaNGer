@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Groovy_Tang - build real Ethernet frames (CMD_INIT + CMD_BLIT_FIELD_VSYNC + pixel
-# payload datagrams) for sim/tb/gwline_ring_e2e_tb.v, with correct UDP checksum +
+# payload datagrams), the library behind gen_gwline_stream.py, with correct UDP checksum +
 # Ethernet FCS, so they can be replayed byte-exact through a real udp.sv instance via
 # RMII (same technique as groovy_udpstress_udpsv_realframe_tb.v). Every pixel encodes
 # its own (source_line, col) as its RGB565 value, so the testbench can check the

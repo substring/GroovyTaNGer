@@ -45,7 +45,7 @@ module gwline_top_e2e_tb;
     rmii netrmii(.clk50m(clk50m), .rx_crs(crs_drv), .mdc(), .txen(), .mdio(mdio_w),
                  .txd(), .rxd(rxd_drv));
     wire [5:0] led;  wire uart_txp;
-    gwline_top dut (.clk(clk27), .rst(rst_n), .netrmii(netrmii), .phyrst(),
+    gwline_top #(.VIDEO_MODE(0)) dut (.clk(clk27), .rst(rst_n), .netrmii(netrmii), .phyrst(),
                     .O_tmds_clk_p(), .O_tmds_clk_n(), .O_tmds_data_p(), .O_tmds_data_n(),
                     .led(led), .uart_txp(uart_txp),
                     .HP_BCK(hp_bck), .HP_WS(hp_ws), .HP_DIN(hp_din), .PA_EN(pa_en));
